@@ -10,7 +10,7 @@ import { ensureFileExists } from "../file-utils.js";
 import * as os from 'os';
 import { openAIParallelBatchRename, applyParallelBatchRename } from "../plugins/openai/parallel-batch-rename.js";
 import * as dbHelpers from "../db/helpers.js";
-import { connectDB, disconnectDB } from "../db/models.js";
+import { connectDB, disconnectDB, IFile, IIdentifier } from "../db/models.js";
 
 // 获取CPU核心数，但限制最大并行度
 const MAX_PARALLELISM = Math.min(os.cpus().length, 8);
@@ -236,7 +236,7 @@ export const openAIBatchParallelApply = cli()
         }
         
         // 获取文件的所有标识符
-        const identifiersResult = await dbHelpers.getFileIdentifiers(file._id.toString());
+        const identifiersResult = await dbHelpers.getFileIdentifiers(file._id?.toString() || file.id);
         if (!identifiersResult.success) {
           throw new Error(`Failed to get identifiers: ${identifiersResult.error}`);
         }
@@ -261,8 +261,12 @@ export const openAIBatchParallelApply = cli()
         // 使用正则表达式替换
         renamedCode = code;
         for (const { original, replacement } of replacements) {
-          const regex = new RegExp(`\\b${escapeRegExp(original)}\\b`, 'g');
-          renamedCode = renamedCode.replace(regex, replacement);
+          if (replacement !== undefined) {
+            const regex = new RegExp(`\\b${escapeRegExp(original)}\\b`, 'g');
+            renamedCode = renamedCode.replace(regex, replacement);
+          } else {
+            verbose.log(`Skipping replacement for ${original} as replacement is undefined`);
+          }
         }
       } else {
         // 使用文件系统中的结果
@@ -415,7 +419,7 @@ export const openAIBatchStatus = cli()
           console.log('-------------------');
           
           for (const job of pendingJobs.jobs) {
-            console.log(`Batch ID: ${job.batch_id}`);
+            console.log(`Batch ID: ${job.id}`);
             console.log(`Status: ${job.status}`);
             console.log(`Created: ${job.created_at}`);
             console.log(`Input File: ${job.input_file_path}`);

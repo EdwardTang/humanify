@@ -22,7 +22,9 @@ export async function connectDB() {
 }
 
 // 文件模型接口
-export interface IFile extends Document {
+export interface IFile {
+  _id?: any;  // MongoDB ID
+  id: string;
   path: string;
   file_name: string;
   file_type: string;
@@ -48,9 +50,11 @@ export interface IChunk extends Document {
 }
 
 // 标识符模型接口
-export interface IIdentifier extends Document {
-  file_id: Types.ObjectId;
-  chunk_id?: Types.ObjectId;
+export interface IIdentifier {
+  _id?: any;  // MongoDB ID
+  id: string;
+  file_id: string;
+  chunk_id?: string;
   original_name: string;
   new_name?: string;
   surrounding_code: string;
@@ -63,7 +67,9 @@ export interface IIdentifier extends Document {
 }
 
 // 处理运行模型接口
-export interface IProcessingRun extends Document {
+export interface IProcessingRun {
+  _id?: any;  // MongoDB ID
+  id: string;
   status: 'running' | 'completed' | 'failed';
   config: string;
   total_files: number;
@@ -94,8 +100,9 @@ export interface IBatchEvent {
 }
 
 // OpenAI批处理模型接口
-export interface IOpenAIBatch extends Document {
-  batch_id: string; // OpenAI批处理ID
+export interface IOpenAIBatch {
+  _id?: any;  // MongoDB ID
+  id: string;
   status: 'created' | 'in_progress' | 'finalizing' | 'completed' | 'failed' | 'cancelled';
   created_at: Date;
   endpoint: string;
@@ -138,14 +145,16 @@ export interface IBatchResponse extends Document {
 }
 
 // 本地批处理跟踪模型接口
-export interface ILocalBatchTracker extends Document {
+export interface ILocalBatchTracker {
+  _id?: any;  // MongoDB ID
+  id: string;
   openai_batch_id: string;
   type: 'small' | 'large' | 'ultra_large';
-  file_ids: Types.ObjectId[];
+  file_ids: string[];
   identifier_count: number;
   tasks_file_path: string;
   output_file_path?: string;
-  processing_run_id: Types.ObjectId;
+  processing_run_id: string;
   processing_start: Date;
   processing_end?: Date;
   status: 'preparing' | 'submitting' | 'processing' | 'downloading' | 'applying' | 'completed' | 'failed';

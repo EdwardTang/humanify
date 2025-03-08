@@ -8,6 +8,7 @@ import { createInterface } from "readline";
 import * as os from 'os';
 import * as dbHelpers from "../../db/helpers.js";
 import fetch from 'node-fetch';
+import { IFile, IIdentifier } from '../../db/models.js';
 
 // 获取CPU核心数，但限制最大并行度
 const MAX_PARALLELISM = Math.min(os.cpus().length, 8);
@@ -205,7 +206,7 @@ export function openAIParallelBatchRename({
     for (const category of ['small', 'large', 'ultra_large'] as const) {
       const file = files.files[category].find(f => f.path === filename);
       if (file) {
-        fileId = file._id.toString();
+        fileId = file._id?.toString() || file.id;
         // 更新文件状态为处理中
         await dbHelpers.updateFileStatus(fileId, 'processing');
         break;
@@ -457,7 +458,7 @@ export function openAIParallelBatchRename({
                       if (identifier) {
                         // 更新标识符的新名称和状态
                         await dbHelpers.updateIdentifier(
-                          identifier._id.toString(),
+                          identifier._id?.toString() || identifier.id,
                           content,
                           'completed'
                         );
@@ -481,7 +482,7 @@ export function openAIParallelBatchRename({
                     const identifier = batch.identifiers.find(i => i.custom_id === response.custom_id);
                     if (identifier) {
                       await dbHelpers.updateIdentifier(
-                        identifier._id.toString(),
+                        identifier._id?.toString() || identifier.id,
                         identifier.original_name, // 保留原始名称
                         'failed'
                       );
@@ -524,7 +525,7 @@ export function openAIParallelBatchRename({
               // 更新批处理中的标识符状态为失败
               for (const identifier of batch.identifiers) {
                 await dbHelpers.updateIdentifier(
-                  identifier._id.toString(),
+                  identifier._id?.toString() || identifier.id,
                   identifier.original_name, // 保留原始名称
                   'failed'
                 );
@@ -550,7 +551,7 @@ export function openAIParallelBatchRename({
               // 作为一种后备措施，将标识符状态设置为失败
               for (const identifier of batch.identifiers) {
                 await dbHelpers.updateIdentifier(
-                  identifier._id.toString(),
+                  identifier._id?.toString() || identifier.id,
                   identifier.original_name, // 保留原始名称
                   'failed'
                 );
@@ -564,7 +565,7 @@ export function openAIParallelBatchRename({
         // 作为一种后备措施，将标识符状态设置为失败
         for (const identifier of batch.identifiers) {
           await dbHelpers.updateIdentifier(
-            identifier._id.toString(),
+            identifier._id?.toString() || identifier.id,
             identifier.original_name, // 保留原始名称
             'failed'
           );

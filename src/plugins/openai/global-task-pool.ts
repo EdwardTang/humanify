@@ -5,6 +5,8 @@ import * as crypto from "crypto";
 import OpenAI from "openai";
 import { verbose } from "../../verbose.js";
 import { visitAllIdentifiersParallel } from '../../plugins/local-llm-rename/parallel-visit-identifiers.js';
+import * as dbHelpers from '../../db/helpers.js';
+import { IFile, IIdentifier, IProcessingRun, IOpenAIBatch, ILocalBatchTracker } from '../../db/models.js';
 
 // 复杂度阈值常量
 const COMPLEXITY_THRESHOLD = 300;
@@ -149,6 +151,14 @@ export interface GlobalTaskPoolConfig {
   projectId?: string;                                   // 添加项目ID配置
 }
 
+// 添加verbose.warn方法定义
+const verboseWithWarning = {
+  ...verbose,
+  warn: function(message?: any, ...optionalParams: any[]) {
+    console.warn(message, ...optionalParams);
+  }
+};
+
 // 全局任务池类
 export class GlobalTaskPool {
   private tasks: IdentifierTask[] = [];
@@ -171,7 +181,7 @@ export class GlobalTaskPool {
     // 保存文件内容，以便后续处理
     this.fileContents.set(filePath, code);
     
-    verbose.log(`Collecting identifiers from file: ${filePath}`);
+    verboseWithWarning.log(`Collecting identifiers from file: ${filePath}`);
     
     try {
       // 使用并行标识符收集器获取所有标识符
@@ -198,20 +208,20 @@ export class GlobalTaskPool {
           return name; // 返回原始名称，不进行重命名
         },
         this.config.contextWindowSize,
-        (percentage: number) => verbose.log(`Collecting identifiers from ${path.basename(filePath)}: ${Math.floor(percentage * 100)}%`),
+        (percentage: number) => verboseWithWarning.log(`Collecting identifiers from ${path.basename(filePath)}: ${Math.floor(percentage * 100)}%`),
         this.config.concurrency
       );
       
-      verbose.log(`Collected ${this.tasks.length - (this.taskMap.size - this.tasks.length)} identifiers from ${filePath}`);
+      verboseWithWarning.log(`Collected ${this.tasks.length - (this.taskMap.size - this.tasks.length)} identifiers from ${filePath}`);
     } catch (error) {
-      verbose.log(`Error collecting identifiers from ${filePath}: ${error}`);
+      verboseWithWarning.log(`Error collecting identifiers from ${filePath}: ${error}`);
       throw new Error(`Failed to collect identifiers from ${filePath}: ${error}`);
     }
   }
   
   // 创建最优批次
   createOptimalBatches(batchSize: number = this.currentBatchSize): IdentifierTask[][] {
-    verbose.log(`Creating optimal batches with target size: ${this.currentBatchSize}`);
+    verboseWithWarning.log(`Creating optimal batches with target size: ${this.currentBatchSize}`);
     
     // 最大API限制
     const MAX_BATCH_REQUESTS = 50000; // OpenAI限制：最多50,000个请求
@@ -250,7 +260,7 @@ export class GlobalTaskPool {
       return tasksByFile[a].length - tasksByFile[b].length;
     });
     
-    verbose.log(`Creating batches from ${this.tasks.length} tasks in ${sortedFilePaths.length} files`);
+    verboseWithWarning.log(`Creating batches from ${this.tasks.length} tasks in ${sortedFilePaths.length} files`);
     
     // 处理优先级较高（较小文件）的任务
     for (const filePath of sortedFilePaths) {
@@ -259,7 +269,7 @@ export class GlobalTaskPool {
       // 如果当前文件的任务数量超过了最大批处理大小
       // 则为这个文件单独创建多个批次
       if (fileTasks.length > MAX_BATCH_REQUESTS) {
-        verbose.log(`File ${filePath} has ${fileTasks.length} tasks, which exceeds max batch size. Creating multiple batches.`);
+        verboseWithWarning.log(`File ${filePath} has ${fileTasks.length} tasks, which exceeds max batch size. Creating multiple batches.`);
         
         // 单独处理大文件
         let fileTaskBatch: IdentifierTask[] = [];
@@ -273,7 +283,7 @@ export class GlobalTaskPool {
               fileTaskBatchBytes + taskBytes > MAX_BATCH_BYTES) {
             if (fileTaskBatch.length > 0) {
               batches.push(fileTaskBatch);
-              verbose.log(`Created batch for large file with ${fileTaskBatch.length} tasks, size: ${Math.round(fileTaskBatchBytes / (1024 * 1024))}MB`);
+              verboseWithWarning.log(`Created batch for large file with ${fileTaskBatch.length} tasks, size: ${Math.round(fileTaskBatchBytes / (1024 * 1024))}MB`);
               fileTaskBatch = [];
               fileTaskBatchBytes = 0;
             }
@@ -287,7 +297,7 @@ export class GlobalTaskPool {
         // 添加最后一个批次（如果有）
         if (fileTaskBatch.length > 0) {
           batches.push(fileTaskBatch);
-          verbose.log(`Created final batch for large file with ${fileTaskBatch.length} tasks, size: ${Math.round(fileTaskBatchBytes / (1024 * 1024))}MB`);
+          verboseWithWarning.log(`Created final batch for large file with ${fileTaskBatch.length} tasks, size: ${Math.round(fileTaskBatchBytes / (1024 * 1024))}MB`);
         }
         
         continue;
@@ -305,7 +315,7 @@ export class GlobalTaskPool {
         // 添加前一个批次（如果不为空）
         if (currentBatch.length > 0) {
           batches.push(currentBatch);
-          verbose.log(`Created batch with ${currentBatch.length} tasks, size: ${Math.round(currentBatchBytes / (1024 * 1024))}MB`);
+          verboseWithWarning.log(`Created batch with ${currentBatch.length} tasks, size: ${Math.round(currentBatchBytes / (1024 * 1024))}MB`);
           currentBatch = [];
           currentBatchSize = 0;
           currentBatchBytes = 0;
@@ -324,7 +334,7 @@ export class GlobalTaskPool {
                 fileTaskBatchBytes + taskBytes > MAX_BATCH_BYTES) {
               if (fileTaskBatch.length > 0) {
                 batches.push(fileTaskBatch);
-                verbose.log(`Created batch for oversized file with ${fileTaskBatch.length} tasks, size: ${Math.round(fileTaskBatchBytes / (1024 * 1024))}MB`);
+                verboseWithWarning.log(`Created batch for oversized file with ${fileTaskBatch.length} tasks, size: ${Math.round(fileTaskBatchBytes / (1024 * 1024))}MB`);
                 fileTaskBatch = [];
                 fileTaskBatchBytes = 0;
               }
@@ -338,12 +348,12 @@ export class GlobalTaskPool {
           // 添加最后一个批次（如果有）
           if (fileTaskBatch.length > 0) {
             batches.push(fileTaskBatch);
-            verbose.log(`Created final batch for oversized file with ${fileTaskBatch.length} tasks, size: ${Math.round(fileTaskBatchBytes / (1024 * 1024))}MB`);
+            verboseWithWarning.log(`Created final batch for oversized file with ${fileTaskBatch.length} tasks, size: ${Math.round(fileTaskBatchBytes / (1024 * 1024))}MB`);
           }
         } else {
           // 文件任务可以放入一个批次，但需要单独放置
           batches.push(fileTasks);
-          verbose.log(`Created batch for entire file with ${fileTasks.length} tasks, size: ${Math.round(fileTasksBytes / (1024 * 1024))}MB`);
+          verboseWithWarning.log(`Created batch for entire file with ${fileTasks.length} tasks, size: ${Math.round(fileTasksBytes / (1024 * 1024))}MB`);
         }
       } else {
         // 将所有文件任务添加到当前批次
@@ -354,7 +364,7 @@ export class GlobalTaskPool {
         // 如果当前批次足够大，创建新批次
         if (currentBatchSize >= this.config.batchSize) {
           batches.push(currentBatch);
-          verbose.log(`Created batch with ${currentBatch.length} tasks, size: ${Math.round(currentBatchBytes / (1024 * 1024))}MB`);
+          verboseWithWarning.log(`Created batch with ${currentBatch.length} tasks, size: ${Math.round(currentBatchBytes / (1024 * 1024))}MB`);
           currentBatch = [];
           currentBatchSize = 0;
           currentBatchBytes = 0;
@@ -365,7 +375,7 @@ export class GlobalTaskPool {
     // 添加最后一个批次（如果有）
     if (currentBatch.length > 0) {
       batches.push(currentBatch);
-      verbose.log(`Created final batch with ${currentBatch.length} tasks, size: ${Math.round(currentBatchBytes / (1024 * 1024))}MB`);
+      verboseWithWarning.log(`Created final batch with ${currentBatch.length} tasks, size: ${Math.round(currentBatchBytes / (1024 * 1024))}MB`);
     }
     
     // 优化：调整批处理大小
@@ -384,23 +394,23 @@ export class GlobalTaskPool {
             )
           );
           
-          verbose.log(`Adjusting batch size from ${this.currentBatchSize} to ${newBatchSize} based on workload`);
+          verboseWithWarning.log(`Adjusting batch size from ${this.currentBatchSize} to ${newBatchSize} based on workload`);
           this.currentBatchSize = newBatchSize;
         }
       }
     }
     
-    verbose.log(`Created ${batches.length} batches from ${this.tasks.length} tasks`);
+    verboseWithWarning.log(`Created ${batches.length} batches from ${this.tasks.length} tasks`);
     return batches;
   }
   
   // 处理所有批次
   async processBatches(): Promise<Map<string, BatchRenameResult[]>> {
-    verbose.log(`Starting to process all batches`);
+    verboseWithWarning.log(`Starting to process all batches`);
     
     // 如果是 dry-run 模式，只生成批处理文件
     if (this.config.dryRun) {
-      verbose.log(`Dry-run mode enabled, skipping API calls`);
+      verboseWithWarning.log(`Dry-run mode enabled, skipping API calls`);
       await this.generateBatchesOnly();
       return new Map<string, BatchRenameResult[]>();
     }
@@ -410,14 +420,14 @@ export class GlobalTaskPool {
     
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
       const batch = batches[batchIndex];
-      verbose.log(`Processing batch ${batchIndex + 1}/${batches.length} with ${batch.length} tasks`);
+      verboseWithWarning.log(`Processing batch ${batchIndex + 1}/${batches.length} with ${batch.length} tasks`);
       
       // 记录批处理开始时间
       const batchStartTime = Date.now();
       
       // 计算当前批次的平均上下文大小
       const avgContextSize = batch.reduce((sum, item) => sum + item.surroundingCode.length, 0) / batch.length;
-      verbose.log(`Batch ${batchIndex + 1} average context size: ${Math.round(avgContextSize)} characters`);
+      verboseWithWarning.log(`Batch ${batchIndex + 1} average context size: ${Math.round(avgContextSize)} characters`);
       
       // 为每个任务的文件创建输出目录
       const uniqueFilePaths = [...new Set(batch.map(task => task.filePath))];
@@ -451,8 +461,11 @@ export class GlobalTaskPool {
         batchRequests.map(request => JSON.stringify(request)).join('\n')
       );
       
+      // 保存批处理信息到数据库
+      const dbBatchId = await this.saveBatchToDB(batch, tempId, batchTasksFilePath);
+      
       // 上传文件进行批处理
-      verbose.log(`Uploading batch ${batchIndex + 1} to OpenAI`);
+      verboseWithWarning.log(`Uploading batch ${batchIndex + 1} to OpenAI`);
       
       let batchFile;
       try {
@@ -462,12 +475,12 @@ export class GlobalTaskPool {
           purpose: "batch"
         });
       } catch (error) {
-        verbose.log(`Error uploading batch file: ${error}`);
+        verboseWithWarning.log(`Error uploading batch file: ${error}`);
         throw new Error(`Failed to upload batch file: ${error}`);
       }
       
       // 创建批处理作业
-      verbose.log(`Creating batch job for batch ${batchIndex + 1}`);
+      verboseWithWarning.log(`Creating batch job for batch ${batchIndex + 1}`);
       const batchJobStartTime = Date.now();
       
       let openAIBatch: { id: string };
@@ -481,32 +494,19 @@ export class GlobalTaskPool {
         // 更新批处理请求中的OpenAI批处理ID
         batchRequests.forEach(req => req.openai_batch_id = openAIBatch.id);
         
-        // 创建本地批处理跟踪记录
-        const localBatchTracker: LocalBatchTracker = {
-          id: crypto.randomUUID(),
-          openai_batch_id: openAIBatch.id,
-          type: 'small', // 根据批次大小确定类型
-          file_ids: uniqueFilePaths,
-          identifier_count: batch.length,
-          tasks_file_path: batchTasksFilePath,
-          processing_run_id: crypto.randomUUID(), // 生成一个临时处理运行ID
-          processing_start: new Date(),
-          status: 'submitting',
-          created_at: new Date(),
-          updated_at: new Date(),
-          project_id: this.config.projectId
-        };
-        
-        // 在这里可以将localBatchTracker保存到数据库
-        verbose.log(`Created local batch tracker with ID: ${localBatchTracker.id}`);
+        // 保存 OpenAI 批处理信息到数据库
+        if (dbBatchId) {
+          await this.saveOpenAIBatchInfo(dbBatchId, openAIBatch.id, batchTasksFilePath);
+          await this.updateBatchStatus(dbBatchId, 'processing');
+        }
         
       } catch (error) {
-        verbose.log(`Error creating batch job: ${error}`);
+        verboseWithWarning.log(`Error creating batch job: ${error}`);
         throw new Error(`Failed to create batch job: ${error}`);
       }
       
       // 轮询批处理作业完成情况
-      verbose.log(`Waiting for batch ${batchIndex + 1} to complete...`);
+      verboseWithWarning.log(`Waiting for batch ${batchIndex + 1} to complete...`);
       let jobCompleted = false;
       let batchEvents: BatchEvent[] = [];
       
@@ -519,7 +519,7 @@ export class GlobalTaskPool {
       while (!jobCompleted) {
         try {
           const jobStatus = await this.client.batches.retrieve(openAIBatch.id);
-          verbose.log(`Batch ${batchIndex + 1} status: ${jobStatus.status}`);
+          verboseWithWarning.log(`Batch ${batchIndex + 1} status: ${jobStatus.status}`);
           
           // 记录状态变更事件
           if (batchEvents.length === 0 || batchEvents[batchEvents.length - 1].status !== jobStatus.status) {
@@ -553,35 +553,40 @@ export class GlobalTaskPool {
             };
             
             // 在这里可以将completedOpenAIBatch保存到数据库
-            verbose.log(`Completed OpenAI batch with ID: ${completedOpenAIBatch.id}`);
+            verboseWithWarning.log(`Completed OpenAI batch with ID: ${completedOpenAIBatch.id}`);
+            
+            // 更新批处理状态
+            if (dbBatchId) {
+              await this.updateBatchStatus(dbBatchId, 'completed');
+            }
             
           } else if (jobStatus.status === 'failed') {
-            verbose.log(`Batch ${batchIndex + 1} failed: ${jobStatus.errors ? JSON.stringify(jobStatus.errors) : 'Unknown error'}`);
+            verboseWithWarning.log(`Batch ${batchIndex + 1} failed: ${jobStatus.errors ? JSON.stringify(jobStatus.errors) : 'Unknown error'}`);
             throw new Error(`Batch processing failed: ${jobStatus.errors ? JSON.stringify(jobStatus.errors) : 'Unknown error'}`);
           } else {
             // 等待一段时间后再次检查
             await new Promise(resolve => setTimeout(resolve, this.config.pollingInterval));
           }
         } catch (error) {
-          verbose.log(`Error polling batch job: ${error}`);
+          verboseWithWarning.log(`Error polling batch job: ${error}`);
           throw new Error(`Failed to poll batch job: ${error}`);
         }
       }
       
       // 下载输出文件
-      verbose.log(`Downloading batch ${batchIndex + 1} output file`);
+      verboseWithWarning.log(`Downloading batch ${batchIndex + 1} output file`);
       const outputFilePath = path.join(this.config.outputDir, `${openAIBatch.id}_output.jsonl`);
       
       try {
         const outputFileContent = await this.downloadOutputFile(openAIBatch.id);
         await fs.writeFile(outputFilePath, outputFileContent);
       } catch (error) {
-        verbose.log(`Error downloading output file: ${error}`);
+        verboseWithWarning.log(`Error downloading output file: ${error}`);
         throw new Error(`Failed to download output file: ${error}`);
       }
       
       // 解析输出结果
-      verbose.log(`Parsing batch ${batchIndex + 1} results`);
+      verboseWithWarning.log(`Parsing batch ${batchIndex + 1} results`);
       let batchResponses: BatchResponse[] = [];
       
       try {
@@ -594,7 +599,7 @@ export class GlobalTaskPool {
           };
         });
       } catch (error) {
-        verbose.log(`Error parsing output file: ${error}`);
+        verboseWithWarning.log(`Error parsing output file: ${error}`);
         throw new Error(`Failed to parse output file: ${error}`);
       }
       
@@ -606,7 +611,7 @@ export class GlobalTaskPool {
         try {
           const task = this.taskMap.get(response.custom_id);
           if (!task) {
-            verbose.log(`Task not found for custom_id: ${response.custom_id}`);
+            verboseWithWarning.log(`Task not found for custom_id: ${response.custom_id}`);
             continue;
           }
           
@@ -642,7 +647,7 @@ export class GlobalTaskPool {
             project_id: this.config.projectId
           });
         } catch (error) {
-          verbose.log(`Error processing result: ${error}`);
+          verboseWithWarning.log(`Error processing result: ${error}`);
           if (response.custom_id) {
             failedResults.push({
               customId: response.custom_id,
@@ -656,7 +661,7 @@ export class GlobalTaskPool {
       for (const result of successfulResults) {
         const filePath = this.taskMap.get(result.customId)?.filePath;
         if (!filePath) {
-          verbose.log(`Warning: Could not find file path for custom ID ${result.customId}`);
+          verboseWithWarning.log(`Warning: Could not find file path for custom ID ${result.customId}`);
           continue;
         }
         
@@ -678,7 +683,7 @@ export class GlobalTaskPool {
         project_id: this.config.projectId
       });
       
-      verbose.log(`Batch ${batchIndex + 1} completed in ${processingTime}ms with ${successfulResults.length}/${batch.length} successful renames`);
+      verboseWithWarning.log(`Batch ${batchIndex + 1} completed in ${processingTime}ms with ${successfulResults.length}/${batch.length} successful renames`);
     }
     
     return this.fileResults;
@@ -686,12 +691,12 @@ export class GlobalTaskPool {
   
   // 应用结果到各个文件
   async applyResults(): Promise<Map<string, string>> {
-    verbose.log(`Applying rename results to files`);
+    verboseWithWarning.log(`Applying rename results to files`);
     
     const renamedFiles = new Map<string, string>();
     
     for (const [filePath, results] of this.fileResults.entries()) {
-      verbose.log(`Applying ${results.length} renames to ${filePath}`);
+      verboseWithWarning.log(`Applying ${results.length} renames to ${filePath}`);
       
       // 获取原始代码
       const originalCode = this.fileContents.get(filePath) || "";
@@ -708,20 +713,20 @@ export class GlobalTaskPool {
             );
             
             if (matchingRename) {
-              verbose.log(`Renaming ${name} to ${matchingRename.newName}`);
+              verboseWithWarning.log(`Renaming ${name} to ${matchingRename.newName}`);
               return matchingRename.newName;
             }
             
             return name; // 如果没有找到匹配项，则保留原始名称
           },
           Infinity, // 使用最大上下文大小确保准确匹配
-          (percentage: number) => verbose.log(`Applying renames to ${path.basename(filePath)}: ${Math.floor(percentage * 100)}%`),
+          (percentage: number) => verboseWithWarning.log(`Applying renames to ${path.basename(filePath)}: ${Math.floor(percentage * 1024)}%`),
           this.config.concurrency // 使用指定的并行度
         );
         
         renamedFiles.set(filePath, renamedCode);
       } catch (error) {
-        verbose.log(`Error applying renames to ${filePath}: ${error}`);
+        verboseWithWarning.log(`Error applying renames to ${filePath}: ${error}`);
         throw new Error(`Failed to apply renames to ${filePath}: ${error}`);
       }
     }
@@ -861,18 +866,18 @@ The name should be descriptive, reflect the purpose or role, and follow JavaScri
   
   // 仅生成批处理文件，不发送API请求（用于dry-run模式）
   async generateBatchesOnly(): Promise<void> {
-    verbose.log(`Generating batch files only (dry-run mode)`);
+    verboseWithWarning.log(`Generating batch files only (dry-run mode)`);
     
     // 创建最优批次
     const batches = this.createOptimalBatches();
     
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
       const batch = batches[batchIndex];
-      verbose.log(`Generating batch ${batchIndex + 1}/${batches.length} with ${batch.length} tasks`);
+      verboseWithWarning.log(`Generating batch ${batchIndex + 1}/${batches.length} with ${batch.length} tasks`);
       
       // 计算当前批次的平均上下文大小
       const avgContextSize = batch.reduce((sum, item) => sum + item.surroundingCode.length, 0) / batch.length;
-      verbose.log(`Batch ${batchIndex + 1} average context size: ${Math.round(avgContextSize)} characters`);
+      verboseWithWarning.log(`Batch ${batchIndex + 1} average context size: ${Math.round(avgContextSize)} characters`);
       
       // 为每个任务的文件创建输出目录
       const uniqueFilePaths = [...new Set(batch.map(task => task.filePath))];
@@ -924,8 +929,8 @@ The name should be descriptive, reflect the purpose or role, and follow JavaScri
         }, null, 2)
       );
       
-      verbose.log(`Generated batch file: ${batchTasksFilePath}`);
-      verbose.log(`Generated batch details: ${batchDetailsFilePath}`);
+      verboseWithWarning.log(`Generated batch file: ${batchTasksFilePath}`);
+      verboseWithWarning.log(`Generated batch details: ${batchDetailsFilePath}`);
     }
     
     // 保存全局任务索引
@@ -948,12 +953,12 @@ The name should be descriptive, reflect the purpose or role, and follow JavaScri
       }, null, 2)
     );
     
-    verbose.log(`All batch files generated successfully. See: ${this.config.outputDir}`);
+    verboseWithWarning.log(`All batch files generated successfully. See: ${this.config.outputDir}`);
   }
   
   // 下载输出文件的实现
   private async downloadOutputFile(batchId: string): Promise<string> {
-    verbose.log(`Downloading output file for batch: ${batchId}`);
+    verboseWithWarning.log(`Downloading output file for batch: ${batchId}`);
     
     try {
       const batchInfo = await this.client.batches.retrieve(batchId);
@@ -975,8 +980,135 @@ The name should be descriptive, reflect the purpose or role, and follow JavaScri
         return chunks.join('');
       }
     } catch (error) {
-      verbose.log(`Error downloading output file: ${error}`);
+      verboseWithWarning.log(`Error downloading output file: ${error}`);
       throw new Error(`Failed to download output file: ${error}`);
+    }
+  }
+
+  // 在 GlobalTaskPool 类中添加数据库相关方法
+  async addTaskToDB(task: IdentifierTask): Promise<string | undefined> {
+    if (!this.config.projectId) return undefined;
+    
+    try {
+      // 创建标识符记录
+      const result = await dbHelpers.createIdentifiers([{
+        file_id: task.file_id || '',
+        chunk_id: task.chunk_id,
+        original_name: task.name,
+        surrounding_code: task.surroundingCode,
+        custom_id: task.customId,
+        status: 'pending',
+        created_at: new Date(),
+        updated_at: new Date(),
+        project_id: this.config.projectId
+      }]);
+      
+      if (result.success && result.identifierIds && result.identifierIds.length > 0) {
+        verboseWithWarning.log(`Added identifier to DB: ${task.name} (${result.identifierIds[0]})`);
+        return result.identifierIds[0];
+      }
+      
+      verboseWithWarning.warn(`Failed to add identifier to DB: ${result.error}`);
+      return undefined;
+    } catch (error) {
+      verboseWithWarning.warn(`Error adding task to DB: ${error}`);
+      return undefined;
+    }
+  }
+
+  async saveBatchToDB(batch: IdentifierTask[], batchId: string, taskFilePath: string): Promise<string | undefined> {
+    if (!this.config.projectId) return undefined;
+    
+    try {
+      // 收集文件ID
+      const fileIds = [...new Set(batch.filter(task => task.file_id).map(task => task.file_id!))];
+      
+      // 创建本地批处理跟踪记录
+      const result = await dbHelpers.createLocalBatchTracker({
+        id: batchId,
+        openai_batch_id: '', // 将在提交批处理后更新
+        type: 'small', // 默认类型，可以根据实际情况调整
+        file_ids: fileIds,
+        identifier_count: batch.length,
+        tasks_file_path: taskFilePath,
+        processing_run_id: '', // 处理运行ID，可能需要从外部传入
+        processing_start: new Date(),
+        processing_end: undefined,
+        status: 'preparing',
+        created_at: new Date(),
+        updated_at: new Date(),
+        error: undefined,
+        project_id: this.config.projectId
+      });
+      
+      if (result.success && result.trackerId) {
+        verboseWithWarning.log(`Created batch in DB: ${result.trackerId}`);
+        
+        // 更新批次中的标识符，关联到此批次
+        for (const task of batch) {
+          if (task.customId) {
+            await dbHelpers.updateIdentifier(
+              task.customId,
+              task.name,
+              'pending',
+              result.trackerId // 将批次ID作为参数传递
+            );
+          }
+        }
+        
+        return result.trackerId;
+      }
+      
+      verboseWithWarning.warn(`Failed to create batch in DB: ${result.error}`);
+      return undefined;
+    } catch (error) {
+      verboseWithWarning.warn(`Error saving batch to DB: ${error}`);
+      return undefined;
+    }
+  }
+
+  async updateBatchStatus(batchId: string, status: ILocalBatchTracker['status'], error?: string): Promise<boolean> {
+    if (!this.config.projectId || !batchId) return false;
+    
+    try {
+      const result = await dbHelpers.updateLocalBatchTrackerStatus(batchId, status, error);
+      return result.success;
+    } catch (error) {
+      verboseWithWarning.warn(`Error updating batch status: ${error}`);
+      return false;
+    }
+  }
+
+  async saveOpenAIBatchInfo(batchId: string, openAIBatchId: string, inputPath: string): Promise<boolean> {
+    if (!this.config.projectId || !batchId || !openAIBatchId) return false;
+    
+    try {
+      // 更新本地批处理跟踪记录的 OpenAI 批处理 ID
+      const updateResult = await dbHelpers.updateLocalBatchTrackerOpenAIBatchId(batchId, openAIBatchId);
+      
+      // 创建 OpenAI 批处理记录
+      const batchResult = await dbHelpers.createOpenAIBatch({
+        id: openAIBatchId,
+        status: 'created',
+        created_at: new Date(),
+        endpoint: '/v1/chat/completions',
+        completion_window: '24h',
+        total_requests: 0, // 将在状态更新时填充
+        completed_requests: 0,
+        failed_requests: 0,
+        input_file_id: '',
+        input_file_path: inputPath,
+        events: [{
+          timestamp: new Date(),
+          status: 'created'
+        }],
+        project_id: this.config.projectId
+      });
+      
+      return updateResult.success && batchResult.success;
+    } catch (error) {
+      verboseWithWarning.warn(`Error saving OpenAI batch info: ${error}`);
+      return false;
     }
   }
 } 
