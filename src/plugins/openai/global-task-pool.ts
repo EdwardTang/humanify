@@ -9,31 +9,127 @@ import { visitAllIdentifiersParallel } from '../../plugins/local-llm-rename/para
 // 复杂度阈值常量
 const COMPLEXITY_THRESHOLD = 300;
 
+// 批处理请求接口
+export interface BatchRequest {
+  custom_id: string;                                    // 自定义ID，用于关联标识符
+  method: string;                                       // HTTP方法 (通常为 "POST")
+  url: string;                                          // API端点URL (如 "/v1/chat/completions")
+  body: any;                                            // 请求体，包含模型、消息等
+  openai_batch_id?: string;                             // OpenAI批处理ID
+  project_id?: string;                                  // 项目ID
+}
+
+// 批处理响应接口
+export interface BatchResponse {
+  id: string;                                           // 批处理请求ID
+  custom_id: string;                                    // 自定义ID，用于关联请求和标识符
+  response: {                                           // 响应对象
+    status_code: number;                                // HTTP状态码
+    request_id: string;                                 // 请求ID
+    body: any;                                          // 响应体，包含模型生成的内容
+    error?: any;                                        // 错误信息
+  };
+  openai_batch_id?: string;                             // OpenAI批处理ID
+}
+
+// 批处理事件接口
+export interface BatchEvent {
+  timestamp: Date;                                      // 事件时间戳
+  status: 'created' | 'in_progress' | 'finalizing' | 'completed' | 'failed' | 'cancelled'; // 事件状态
+  details?: string;                                     // 事件详情
+}
+
+// 文件信息接口
+export interface FileInfo {
+  id: string;                                           // 唯一标识符
+  path: string;                                         // 文件路径
+  file_name: string;                                    // 文件名
+  file_type: string;                                    // 文件类型
+  size: number;                                         // 文件大小
+  status: 'pending' | 'processing' | 'completed' | 'failed'; // 处理状态
+  category: 'small' | 'large' | 'ultra_large';          // 文件分类
+  chunk_count?: number;                                 // 分块数量
+  last_processing_time?: number;                        // 处理时间
+  last_processing_error?: string;                       // 错误消息
+  created_at: Date;                                     // 创建时间
+  updated_at: Date;                                     // 更新时间
+  project_id?: string;                                  // 项目ID
+}
+
 // 标识符任务接口
 export interface IdentifierTask {
-  name: string;              // 标识符名称
-  surroundingCode: string;   // 上下文代码
-  customId: string;          // 唯一ID
-  complexity: number;        // 复杂度
-  filePath: string;          // 来源文件
-  filePathHash: string;      // 文件路径哈希
+  name: string;                                         // 标识符名称
+  surroundingCode: string;                              // 上下文代码
+  customId: string;                                     // 唯一ID
+  complexity: number;                                   // 复杂度
+  filePath: string;                                     // 来源文件
+  filePathHash: string;                                 // 文件路径哈希
+  file_id?: string;                                     // 所属文件ID
+  chunk_id?: string;                                    // 所属块ID
+  project_id?: string;                                  // 项目ID
 }
 
 // 批处理结果接口
 export interface BatchRenameResult {
-  originalName: string;
-  newName: string;
-  surroundingCode: string;
-  customId: string;
+  originalName: string;                                 // 原始名称
+  newName: string;                                      // 新名称
+  surroundingCode: string;                              // 上下文代码
+  customId: string;                                     // 自定义ID
+  filePath?: string;                                    // 文件路径
+  file_id?: string;                                     // 所属文件ID
+  batch_id?: string;                                    // 所属批次ID
+  project_id?: string;                                  // 项目ID
 }
 
 // 性能指标接口
 export interface BatchPerformanceMetrics {
-  batchSize: number;
-  processingTime: number;         // 毫秒
-  avgContextSize: number;         // 平均上下文大小
-  successRate: number;            // 成功率 (0-1)
-  apiLatency: number;             // API响应时间
+  batchSize: number;                                    // 批处理大小
+  processingTime: number;                               // 处理时间(毫秒)
+  avgContextSize: number;                               // 平均上下文大小
+  successRate: number;                                  // 成功率 (0-1)
+  apiLatency: number;                                   // API响应时间
+  run_id?: string;                                      // 关联的处理运行ID
+  project_id?: string;                                  // 项目ID
+}
+
+// OpenAI批处理接口
+export interface OpenAIBatch {
+  id: string;                                           // OpenAI批处理ID
+  status: BatchEvent['status'];                         // 批处理状态
+  created_at: Date;                                     // 创建时间
+  endpoint: string;                                     // API端点
+  completion_window: string;                            // 完成窗口
+  completion_time?: string;                             // 完成时间
+  total_requests: number;                               // 总请求数
+  completed_requests: number;                           // 完成的请求数
+  failed_requests: number;                              // 失败的请求数
+  input_file_id: string;                                // 输入文件ID
+  input_file_path: string;                              // 输入文件路径
+  output_file_id?: string;                              // 输出文件ID
+  output_file_path?: string;                            // 输出文件路径
+  error_file_path?: string;                             // 错误文件路径
+  events: BatchEvent[];                                 // 批处理事件列表
+  error?: string;                                       // 错误信息
+  project_id?: string;                                  // 项目ID
+}
+
+// 本地批处理跟踪接口
+export interface LocalBatchTracker {
+  id: string;                                           // 本地唯一标识符
+  openai_batch_id: string;                              // OpenAI批处理ID
+  type: 'small' | 'large' | 'ultra_large';              // 批次类型
+  file_ids: string[];                                   // 包含的文件ID列表
+  identifier_count: number;                             // 标识符数量
+  tasks_file_path: string;                              // 任务文件路径
+  output_file_path?: string;                            // 输出文件路径
+  processing_run_id: string;                            // 处理运行ID
+  processing_start: Date;                               // 处理开始时间
+  processing_end?: Date;                                // 处理结束时间
+  status: 'preparing' | 'submitting' | 'processing' | 'downloading' | 'applying' | 'completed' | 'failed'; // 本地处理状态
+  error?: string;                                       // 错误信息
+  created_at: Date;                                     // 创建时间
+  updated_at: Date;                                     // 更新时间
+  project_id?: string;                                  // 项目ID
 }
 
 // 全局配置接口
@@ -50,6 +146,7 @@ export interface GlobalTaskPoolConfig {
   minBatchSize: number;
   maxBatchSize: number;
   dryRun?: boolean;
+  projectId?: string;                                   // 添加项目ID配置
 }
 
 // 全局任务池类
@@ -337,11 +434,12 @@ export class GlobalTaskPool {
       }
       
       // 创建批处理任务文件
-      const tasks = batch.map(item => ({
+      const batchRequests: BatchRequest[] = batch.map(item => ({
         custom_id: item.customId,
         method: "POST",
         url: "/v1/chat/completions",
-        body: this.toRenamePrompt(item.name, item.surroundingCode, this.config.model)
+        body: this.toRenamePrompt(item.name, item.surroundingCode, this.config.model),
+        project_id: this.config.projectId
       }));
       
       // 使用唯一的临时文件名
@@ -350,7 +448,7 @@ export class GlobalTaskPool {
       
       await fs.writeFile(
         batchTasksFilePath, 
-        tasks.map(task => JSON.stringify(task)).join('\n')
+        batchRequests.map(request => JSON.stringify(request)).join('\n')
       );
       
       // 上传文件进行批处理
@@ -372,13 +470,36 @@ export class GlobalTaskPool {
       verbose.log(`Creating batch job for batch ${batchIndex + 1}`);
       const batchJobStartTime = Date.now();
       
-      let batchJob;
+      let openAIBatch: { id: string };
       try {
-        batchJob = await this.client.batches.create({
+        openAIBatch = await this.client.batches.create({
           input_file_id: batchFile.id,
           endpoint: "/v1/chat/completions",
           completion_window: "24h"
         });
+        
+        // 更新批处理请求中的OpenAI批处理ID
+        batchRequests.forEach(req => req.openai_batch_id = openAIBatch.id);
+        
+        // 创建本地批处理跟踪记录
+        const localBatchTracker: LocalBatchTracker = {
+          id: crypto.randomUUID(),
+          openai_batch_id: openAIBatch.id,
+          type: 'small', // 根据批次大小确定类型
+          file_ids: uniqueFilePaths,
+          identifier_count: batch.length,
+          tasks_file_path: batchTasksFilePath,
+          processing_run_id: crypto.randomUUID(), // 生成一个临时处理运行ID
+          processing_start: new Date(),
+          status: 'submitting',
+          created_at: new Date(),
+          updated_at: new Date(),
+          project_id: this.config.projectId
+        };
+        
+        // 在这里可以将localBatchTracker保存到数据库
+        verbose.log(`Created local batch tracker with ID: ${localBatchTracker.id}`);
+        
       } catch (error) {
         verbose.log(`Error creating batch job: ${error}`);
         throw new Error(`Failed to create batch job: ${error}`);
@@ -387,20 +508,58 @@ export class GlobalTaskPool {
       // 轮询批处理作业完成情况
       verbose.log(`Waiting for batch ${batchIndex + 1} to complete...`);
       let jobCompleted = false;
-      let batchJobResult: any;
+      let batchEvents: BatchEvent[] = [];
+      
+      // 记录批处理创建事件
+      batchEvents.push({
+        timestamp: new Date(),
+        status: 'created'
+      });
       
       while (!jobCompleted) {
         try {
-          const jobStatus = await this.client.batches.retrieve(batchJob.id);
+          const jobStatus = await this.client.batches.retrieve(openAIBatch.id);
           verbose.log(`Batch ${batchIndex + 1} status: ${jobStatus.status}`);
+          
+          // 记录状态变更事件
+          if (batchEvents.length === 0 || batchEvents[batchEvents.length - 1].status !== jobStatus.status) {
+            batchEvents.push({
+              timestamp: new Date(),
+              status: jobStatus.status as BatchEvent['status']
+            });
+          }
           
           if (jobStatus.status === 'completed') {
             jobCompleted = true;
-            batchJobResult = jobStatus;
+            
+            // 更新OpenAIBatch对象
+            const completedOpenAIBatch: OpenAIBatch = {
+              id: openAIBatch.id,
+              status: jobStatus.status as BatchEvent['status'],
+              created_at: new Date(jobStatus.created_at),
+              endpoint: jobStatus.endpoint || "/v1/chat/completions",
+              completion_window: jobStatus.expires_at ? "24h" : "unknown",
+              completion_time: `${Math.round((Date.now() - batchJobStartTime) / 60000)} minutes`,
+              // 使用安全的属性访问方式
+              total_requests: (jobStatus as any).n_requests || batch.length,
+              completed_requests: (jobStatus as any).n_succeeded || 0,
+              failed_requests: (jobStatus as any).n_failed || 0,
+              input_file_id: batchFile.id,
+              input_file_path: batchTasksFilePath,
+              output_file_id: jobStatus.output_file_id,
+              output_file_path: `${openAIBatch.id}_output.jsonl`,
+              events: batchEvents,
+              project_id: this.config.projectId
+            };
+            
+            // 在这里可以将completedOpenAIBatch保存到数据库
+            verbose.log(`Completed OpenAI batch with ID: ${completedOpenAIBatch.id}`);
+            
           } else if (jobStatus.status === 'failed') {
-            throw new Error(`Batch job ${batchJob.id} failed: ${JSON.stringify(jobStatus.errors || 'Unknown error')}`);
+            verbose.log(`Batch ${batchIndex + 1} failed: ${jobStatus.errors ? JSON.stringify(jobStatus.errors) : 'Unknown error'}`);
+            throw new Error(`Batch processing failed: ${jobStatus.errors ? JSON.stringify(jobStatus.errors) : 'Unknown error'}`);
           } else {
-            // 等待轮询间隔后再次检查
+            // 等待一段时间后再次检查
             await new Promise(resolve => setTimeout(resolve, this.config.pollingInterval));
           }
         } catch (error) {
@@ -409,90 +568,103 @@ export class GlobalTaskPool {
         }
       }
       
-      // 记录API延迟时间
-      const apiLatency = Date.now() - batchJobStartTime;
-      verbose.log(`Batch ${batchIndex + 1} API latency: ${apiLatency}ms`);
+      // 下载输出文件
+      verbose.log(`Downloading batch ${batchIndex + 1} output file`);
+      const outputFilePath = path.join(this.config.outputDir, `${openAIBatch.id}_output.jsonl`);
       
-      // 获取结果
-      verbose.log(`Retrieving results for batch ${batchIndex + 1}`);
-      
-      let resultContentText = '';
       try {
-        const resultFileId = batchJobResult.output_file_id;
-        const resultContentStream = await this.client.files.content(resultFileId);
-        
-        // 处理不同的响应类型
-        if (resultContentStream instanceof Uint8Array) {
-          resultContentText = new TextDecoder().decode(resultContentStream);
-        } else {
-          // 作为流或其他响应类型处理
-          const chunks = [];
-          for await (const chunk of resultContentStream as any) {
-            chunks.push(typeof chunk === 'string' ? chunk : new TextDecoder().decode(chunk));
-          }
-          resultContentText = chunks.join('');
-        }
+        const outputFileContent = await this.downloadOutputFile(openAIBatch.id);
+        await fs.writeFile(outputFilePath, outputFileContent);
       } catch (error) {
-        verbose.log(`Error retrieving batch results: ${error}`);
-        throw new Error(`Failed to retrieve batch results: ${error}`);
+        verbose.log(`Error downloading output file: ${error}`);
+        throw new Error(`Failed to download output file: ${error}`);
       }
       
-      const resultLines = resultContentText.split('\n');
-      const batchResults = resultLines
-        .filter(line => line.trim())
-        .map(line => JSON.parse(line));
+      // 解析输出结果
+      verbose.log(`Parsing batch ${batchIndex + 1} results`);
+      let batchResponses: BatchResponse[] = [];
       
-      // 计算成功率
-      const successCount = batchResults.filter(result => 
-        result.response && result.response.body && 
-        result.response.body.choices && 
-        result.response.body.choices[0] && 
-        result.response.body.choices[0].message
-      ).length;
-      const successRate = successCount / batch.length;
+      try {
+        const outputFileLines = (await fs.readFile(outputFilePath, 'utf-8')).split('\n').filter(Boolean);
+        batchResponses = outputFileLines.map(line => {
+          const response = JSON.parse(line);
+          return {
+            ...response,
+            openai_batch_id: openAIBatch.id
+          };
+        });
+      } catch (error) {
+        verbose.log(`Error parsing output file: ${error}`);
+        throw new Error(`Failed to parse output file: ${error}`);
+      }
       
-      verbose.log(`Batch ${batchIndex + 1} success rate: ${Math.round(successRate * 100)}%`);
+      // 处理结果
+      const successfulResults: BatchRenameResult[] = [];
+      const failedResults: { customId: string, error: any }[] = [];
       
-      // 处理重命名结果
-      for (const result of batchResults) {
+      for (const response of batchResponses) {
         try {
-          const customId = result.custom_id;
-          const originalTask = this.taskMap.get(customId);
-          
-          if (!originalTask) {
-            verbose.log(`Warning: Could not find original task for custom ID ${customId}`);
+          const task = this.taskMap.get(response.custom_id);
+          if (!task) {
+            verbose.log(`Task not found for custom_id: ${response.custom_id}`);
             continue;
           }
           
-          const responseContent = result.response.body.choices[0].message.content;
-          const parsedContent = JSON.parse(responseContent);
-          
-          // 将结果添加到对应文件的结果集合中
-          if (!this.fileResults.has(originalTask.filePath)) {
-            this.fileResults.set(originalTask.filePath, []);
+          if (response.response.status_code !== 200 || response.response.error) {
+            failedResults.push({
+              customId: response.custom_id,
+              error: response.response.error || `Status code: ${response.response.status_code}`
+            });
+            continue;
           }
           
-          this.fileResults.get(originalTask.filePath)!.push({
-            originalName: originalTask.name,
-            newName: parsedContent.newName,
-            surroundingCode: originalTask.surroundingCode,
-            customId: customId
+          const content = response.response.body.choices[0].message.content;
+          let result: { newName: string };
+          
+          try {
+            result = JSON.parse(content);
+          } catch (jsonError) {
+            failedResults.push({
+              customId: response.custom_id,
+              error: `Invalid JSON response: ${content}`
+            });
+            continue;
+          }
+          
+          successfulResults.push({
+            originalName: task.name,
+            newName: result.newName,
+            surroundingCode: task.surroundingCode,
+            customId: response.custom_id,
+            filePath: task.filePath,
+            file_id: task.file_id,
+            batch_id: response.openai_batch_id,
+            project_id: this.config.projectId
           });
         } catch (error) {
           verbose.log(`Error processing result: ${error}`);
+          if (response.custom_id) {
+            failedResults.push({
+              customId: response.custom_id,
+              error: `Processing error: ${error}`
+            });
+          }
         }
       }
       
-      // 为每个文件保存批次结果
-      for (const [filePath, results] of this.fileResults.entries()) {
-        const fileHash = this.getFilePathHash(filePath);
-        const resultDir = path.join(this.config.outputDir, fileHash);
-        const batchResultsFilePath = path.join(resultDir, "batch_results.json");
+      // 将结果添加到对应文件的结果集合中
+      for (const result of successfulResults) {
+        const filePath = this.taskMap.get(result.customId)?.filePath;
+        if (!filePath) {
+          verbose.log(`Warning: Could not find file path for custom ID ${result.customId}`);
+          continue;
+        }
         
-        await fs.writeFile(
-          batchResultsFilePath,
-          JSON.stringify(results, null, 2)
-        );
+        if (!this.fileResults.has(filePath)) {
+          this.fileResults.set(filePath, []);
+        }
+        
+        this.fileResults.get(filePath)!.push(result);
       }
       
       // 记录批处理性能指标
@@ -501,65 +673,13 @@ export class GlobalTaskPool {
         batchSize: batch.length,
         processingTime,
         avgContextSize,
-        successRate,
-        apiLatency
+        successRate: successfulResults.length / batch.length,
+        apiLatency: processingTime,
+        project_id: this.config.projectId
       });
       
-      verbose.log(`Batch ${batchIndex + 1} processing time: ${processingTime}ms`);
-      
-      // 如果启用了自适应批处理并且已处理了足够多的批次，调整批处理大小
-      if (this.config.adaptiveBatching && (batchIndex + 1) % 2 === 0 && batchIndex < batches.length - 1) {
-        const newBatchSize = this.adaptBatchSize();
-        
-        if (newBatchSize !== this.currentBatchSize) {
-          verbose.log(`Adapting batch size from ${this.currentBatchSize} to ${newBatchSize} based on performance metrics`);
-          
-          // 更新当前批处理大小
-          this.currentBatchSize = newBatchSize;
-          
-          // 重新创建剩余的批次
-          const processedTaskIds = new Set<string>();
-          // 收集所有已处理批次中的任务ID
-          for (let i = 0; i <= batchIndex; i++) {
-            batches[i].forEach((task: IdentifierTask) => {
-              processedTaskIds.add(task.customId);
-            });
-          }
-          
-          const remainingTasks = this.tasks.filter(task => !processedTaskIds.has(task.customId));
-          
-          // 重新排序剩余任务
-          remainingTasks.sort((a, b) => a.complexity - b.complexity);
-          
-          // 重新分配这些任务
-          this.tasks = remainingTasks;
-          
-          // 重新创建批次
-          batches.splice(batchIndex + 1);
-          const newBatches = this.createOptimalBatches();
-          batches.push(...newBatches);
-          
-          verbose.log(`Reorganized remaining work into ${newBatches.length} batches with size ${this.currentBatchSize}`);
-        }
-      }
-      
-      verbose.log(`Completed batch ${batchIndex + 1}/${batches.length}`);
-      
-      // 清理临时文件
-      try {
-        await fs.unlink(batchTasksFilePath);
-      } catch (error) {
-        verbose.log(`Warning: Could not delete temporary file ${batchTasksFilePath}: ${error}`);
-      }
+      verbose.log(`Batch ${batchIndex + 1} completed in ${processingTime}ms with ${successfulResults.length}/${batch.length} successful renames`);
     }
-    
-    // 保存性能指标以供分析
-    await fs.writeFile(
-      path.join(this.config.outputDir, "performance_metrics.json"),
-      JSON.stringify(this.performanceMetrics, null, 2)
-    );
-    
-    verbose.log(`All batches processed. Results saved for ${this.fileResults.size} files`);
     
     return this.fileResults;
   }
@@ -829,5 +949,34 @@ The name should be descriptive, reflect the purpose or role, and follow JavaScri
     );
     
     verbose.log(`All batch files generated successfully. See: ${this.config.outputDir}`);
+  }
+  
+  // 下载输出文件的实现
+  private async downloadOutputFile(batchId: string): Promise<string> {
+    verbose.log(`Downloading output file for batch: ${batchId}`);
+    
+    try {
+      const batchInfo = await this.client.batches.retrieve(batchId);
+      if (!batchInfo.output_file_id) {
+        throw new Error(`No output file ID found for batch: ${batchId}`);
+      }
+      
+      const resultContentStream = await this.client.files.content(batchInfo.output_file_id);
+      
+      // 处理不同的响应类型
+      if (resultContentStream instanceof Uint8Array) {
+        return new TextDecoder().decode(resultContentStream);
+      } else {
+        // 作为流或其他响应类型处理
+        const chunks = [];
+        for await (const chunk of resultContentStream as any) {
+          chunks.push(typeof chunk === 'string' ? chunk : new TextDecoder().decode(chunk));
+        }
+        return chunks.join('');
+      }
+    } catch (error) {
+      verbose.log(`Error downloading output file: ${error}`);
+      throw new Error(`Failed to download output file: ${error}`);
+    }
   }
 } 

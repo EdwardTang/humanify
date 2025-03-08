@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  app:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ..:/workspace:cached
+    command: sleep infinity
+    network_mode: service:mongodb
+    environment:
+      - MONGODB_URI=mongodb://root:example@mongodb:27017/
+      - MONGODB_DATABASE=humanify
+      - NODE_ENV=development
+    depends_on:
+      - mongodb
+
+  mongodb:
+    image: mongo:6.0
+    restart: unless-stopped
+    volumes:
+      - mongodb-data:/data/db
+      - ./mongodb-init.js:/docker-entrypoint-initdb.d/mongodb-init.js:ro
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: example
+      MONGO_INITDB_DATABASE: humanify
+    ports:
+      - "27017:27017"
+
+volumes:
+  mongodb-data: 
