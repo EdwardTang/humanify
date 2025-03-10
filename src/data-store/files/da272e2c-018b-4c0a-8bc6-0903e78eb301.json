@@ -1,0 +1,12 @@
+{
+  "path": "/test/file3.js",
+  "file_name": "file3.js",
+  "file_type": "js",
+  "size": 800000,
+  "status": "pending",
+  "category": "large",
+  "project_id": "test-project",
+  "id": "da272e2c-018b-4c0a-8bc6-0903e78eb301",
+  "created_at": "2025-03-09T12:10:56.852Z",
+  "updated_at": "2025-03-09T12:10:56.852Z"
+}

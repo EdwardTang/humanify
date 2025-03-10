@@ -9,3 +9,5 @@ node_modules/
 
 .idea/
 cursor_0.46.11_app/
+
+venv/

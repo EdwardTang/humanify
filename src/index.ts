@@ -14,18 +14,30 @@ const { version } = packageJson;
 import { download } from "./commands/download.js";
 import { local } from "./commands/local.js";
 import { openai } from "./commands/openai.js";
-import { openAIBatchParallel, openAIBatchParallelApply } from "./commands/openai-batch-parallel.js";
+import { openAIBatchParallel, openAIBatchParallelApply } from "./commands/openai-batch.js";
+import { fullCycleCommand, fullCycleLongRunningCommand, applyRenamesCommand } from "./commands/full-cycle-unminify.js";
 import { cli } from "./cli.js";
 import { azure } from "./commands/gemini.js";
+import { Command } from "commander";
 
-cli()
+// Create a new CLI program
+const program = cli()
   .name("humanify")
   .description("Unminify code using OpenAI's API or a local LLM")
-  .version(version)
-  .addCommand(local)
-  .addCommand(openai)
-  .addCommand(azure)
-  .addCommand(openAIBatchParallel)
-  .addCommand(openAIBatchParallelApply)
-  .addCommand(download())
-  .parse(process.argv);
+  .version(version);
+
+// Add commands
+program.addCommand(local);
+program.addCommand(openai);
+program.addCommand(azure);
+program.addCommand(openAIBatchParallel);
+program.addCommand(openAIBatchParallelApply);
+program.addCommand(download());
+
+// Add full cycle unminify commands
+program.addCommand(fullCycleCommand);
+program.addCommand(fullCycleLongRunningCommand);
+program.addCommand(applyRenamesCommand);
+
+// Parse arguments
+program.parse(process.argv);

@@ -7,4 +7,4 @@ export function cli() {
   command.showHelpAfterError(true).showSuggestionAfterError(false);
 
   return command;
-}
+} 

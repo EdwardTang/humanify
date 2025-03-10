@@ -1,0 +1,16 @@
+{
+  "id": "ee991a00-2c60-422e-88e9-c1e9f88caff5",
+  "name": "Cursor",
+  "version": "0.46.11",
+  "distro": "c883c91dadf5f063b26c86ffe01851acee3747c6",
+  "author": "Anysphere, Inc.",
+  "node_version": ">= 20.11.0 < 21.0.0",
+  "electron_version": "32.2.6",
+  "repository": "https://github.com/microsoft/vscode.git",
+  "main_file": "./out/main.js",
+  "is_active": true,
+  "created_at": "2025-03-09T05:58:33.319Z",
+  "updated_at": "2025-03-09T05:58:33.319Z",
+  "_id": "67cd2e0989627cbabeda4bab",
+  "__v": 0
+}

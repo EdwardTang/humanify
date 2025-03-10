@@ -2,7 +2,7 @@ import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert';
 import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
-import * as dbHelpers from '../db/helpers.js';
+import * as dbHelpers from '../db/db-helpers-adapter.js';
 import { 
   File, 
   Identifier, 

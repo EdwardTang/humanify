@@ -199,4 +199,5 @@ if (require.main === module) {
   });
 } else {
   // 导出为模块使用
-  export { chunkLargeFile }; 
+  module.exports = { chunkLargeFile };
+}
