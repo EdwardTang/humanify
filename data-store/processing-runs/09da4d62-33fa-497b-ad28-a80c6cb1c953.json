@@ -1,0 +1,11 @@
+{
+  "status": "completed",
+  "config": "{\"test\":true}",
+  "total_files": 10,
+  "processed_files": 0,
+  "failed_files": 0,
+  "project_id": "test-project",
+  "start_time": "2025-03-11T06:10:44.604Z",
+  "id": "09da4d62-33fa-497b-ad28-a80c6cb1c953",
+  "end_time": "2025-03-11T06:10:44.606Z"
+}

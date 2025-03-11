@@ -651,4 +651,398 @@ export async function isConnected(): Promise<boolean> {
 export async function disconnectDB(): Promise<void> {
   // 文件存储不需要关闭连接，此函数仅为兼容性而保留
   return;
-} 
+}
+
+// Helper functions with standardized return types for API compatibility
+
+/**
+ * Initialize the database connection and setup (API compatibility version)
+ */
+export const initializeDatabase = async (): Promise<{ success: boolean }> => {
+  await ensureDataDirExists();
+  console.log('数据存储已初始化');
+  return { success: true };
+};
+
+/**
+ * Save a processing run to the database (API compatibility version)
+ */
+export const startProcessingRun = async (
+  configJson: string, 
+  totalFiles: number, 
+  projectId?: string
+): Promise<{ id: string; success: boolean }> => {
+  const run = await saveProcessingRun({
+    status: 'running',
+    config: configJson,
+    total_files: totalFiles,
+    processed_files: 0,
+    failed_files: 0,
+    project_id: projectId || '',
+    start_time: new Date().toISOString()
+  });
+  return { id: run.id, success: true };
+};
+
+/**
+ * Update a processing run in the database (API compatibility version)
+ */
+export const updateProcessingRun = async (
+  runId: string, 
+  updateData: Partial<ProcessingRunInfo>
+): Promise<{ success: boolean }> => {
+  const run = await getProcessingRunById(runId);
+  if (!run) {
+    return { success: false };
+  }
+  
+  await saveProcessingRun({
+    ...run,
+    ...updateData
+  });
+  return { success: true };
+};
+
+/**
+ * Save files to the database (API compatibility version)
+ */
+export const saveFiles = async (
+  files: Array<Partial<FileInfo> & { path: string }>, 
+  projectId?: string
+): Promise<{ success: boolean; savedCount: number }> => {
+  let savedCount = 0;
+  for (const file of files) {
+    await saveFile({
+      ...file,
+      project_id: projectId || file.project_id || ''
+    } as Omit<FileInfo, 'id' | 'created_at' | 'updated_at'> & { id?: string });
+    savedCount++;
+  }
+  return { success: true, savedCount };
+};
+
+/**
+ * Sync files to the database (add or update) (API compatibility version)
+ */
+export const syncFilesToDatabase = async (
+  files: Array<{ path: string; size: number }>, 
+  projectId?: string
+): Promise<{ success: boolean; savedCount: number }> => {
+  const results = [];
+  for (const fileObj of files) {
+    // 确定文件类别
+    let category: FileInfo['category'] = 'small';
+    if (fileObj.size > 500000) {
+      category = fileObj.size > 2000000 ? 'ultra_large' : 'large';
+    }
+    
+    // 从路径中提取文件名和类型
+    const fileName = path.basename(fileObj.path);
+    const fileType = path.extname(fileObj.path).slice(1);
+    
+    // 保存文件
+    const savedFile = await saveFile({
+      path: fileObj.path,
+      file_name: fileName,
+      file_type: fileType,
+      size: fileObj.size,
+      status: 'pending',
+      category,
+      project_id: projectId || ''
+    });
+    
+    results.push(savedFile);
+  }
+  
+  return { success: true, savedCount: results.length };
+};
+
+/**
+ * Get pending files grouped by category (small, large, ultra_large) (API compatibility version)
+ */
+export const getPendingFilesByCategory = async (
+  projectId?: string
+): Promise<{ 
+  success: boolean; 
+  files: { 
+    small: FileInfo[]; 
+    large: FileInfo[]; 
+    ultra_large: FileInfo[]; 
+  } 
+}> => {
+  // 获取所有属于项目的文件
+  const allFiles = projectId ? 
+    await getFilesByProjectId(projectId) : 
+    await getProjects().then(projects => {
+      const activeProject = projects.find(p => p.is_active);
+      return activeProject ? getFilesByProjectId(activeProject.id) : [];
+    });
+  
+  // 按状态过滤
+  const pendingFiles = allFiles.filter(file => file.status === 'pending');
+  
+  // 按类别分组
+  const result = {
+    small: pendingFiles.filter(file => file.category === 'small'),
+    large: pendingFiles.filter(file => file.category === 'large'),
+    ultra_large: pendingFiles.filter(file => file.category === 'ultra_large')
+  };
+  
+  return { success: true, files: result };
+};
+
+/**
+ * Get identifiers ready for batching (API compatibility version)
+ */
+export const getIdentifiersForBatching = async (
+  batchSize: number, 
+  skipCompleted: boolean, 
+  projectId?: string
+): Promise<{ 
+  success: boolean; 
+  batches: Array<{ id: string; identifiers: IdentifierInfo[] }>; 
+  total: number 
+}> => {
+  // 获取所有待处理的标识符
+  let allFiles: FileInfo[] = [];
+  if (projectId) {
+    allFiles = await getFilesByProjectId(projectId);
+  } else {
+    const activeProject = await getActiveProject();
+    if (activeProject) {
+      allFiles = await getFilesByProjectId(activeProject.id);
+    }
+  }
+  
+  // 收集所有标识符
+  let allIdentifiers: IdentifierInfo[] = [];
+  for (const file of allFiles) {
+    const fileIdentifiers = await getIdentifiersByFileId(file.id);
+    allIdentifiers = [...allIdentifiers, ...fileIdentifiers.filter(id => id.status === 'pending')];
+  }
+  
+  // 如果需要跳过已完成的标识符
+  if (skipCompleted) {
+    // 获取所有已完成标识符
+    const completedIdentifiers = new Set<string>();
+    for (const file of allFiles) {
+      const fileIdentifiers = await getIdentifiersByFileId(file.id);
+      fileIdentifiers
+        .filter(id => id.status === 'completed')
+        .forEach(id => completedIdentifiers.add(id.original_name));
+    }
+    
+    // 过滤掉原始名称已经处理过的标识符
+    allIdentifiers = allIdentifiers.filter(id => !completedIdentifiers.has(id.original_name));
+  }
+  
+  // 按批次大小分组
+  const batches = [];
+  for (let i = 0; i < allIdentifiers.length; i += batchSize) {
+    const batchIdentifiers = allIdentifiers.slice(i, i + batchSize);
+    batches.push({
+      id: `batch-${i / batchSize}`,
+      identifiers: batchIdentifiers
+    });
+  }
+  
+  return { success: true, batches, total: allIdentifiers.length };
+};
+
+/**
+ * Save a batch job to the database (API compatibility version)
+ */
+export const saveBatchJob = async (
+  batchJob: { 
+    batchId: string; 
+    jobId: string; 
+    projectId?: string 
+  }
+): Promise<{ success: boolean; id: string }> => {
+  const tracker = await saveLocalBatchTracker({
+    openai_batch_id: batchJob.jobId,
+    type: 'small',
+    file_ids: [],
+    identifier_count: 0,
+    tasks_file_path: '',
+    processing_run_id: batchJob.batchId,
+    processing_start: new Date().toISOString(),
+    status: 'processing',
+    project_id: batchJob.projectId || ''
+  });
+  
+  return { success: true, id: tracker.id };
+};
+
+/**
+ * Get files that have been processed (API compatibility version)
+ */
+export const getProcessedFilesByRunId = async (
+  runId: string, 
+  projectId?: string
+): Promise<{ success: boolean; files: FileInfo[] }> => {
+  // 根据运行ID获取批处理跟踪
+  const trackers = await getLocalBatchTrackersByRunId(runId);
+  
+  // 获取所有涉及的文件ID
+  const fileIds = new Set<string>();
+  trackers.forEach(tracker => {
+    tracker.file_ids.forEach(id => fileIds.add(id));
+  });
+  
+  // 获取所有文件
+  const files: FileInfo[] = [];
+  for (const fileId of fileIds) {
+    const file = await getFileById(fileId);
+    if (file && (!projectId || file.project_id === projectId)) {
+      files.push(file);
+    }
+  }
+  
+  return { success: true, files };
+};
+
+/**
+ * Get identifiers for a specific file (API compatibility version)
+ */
+export const getFileIdentifiers = async (
+  fileId: string, 
+  projectId?: string
+): Promise<{ success: boolean; identifiers: IdentifierInfo[] }> => {
+  const identifiers = await getIdentifiersByFileId(fileId);
+  
+  // 过滤特定项目的标识符（如果指定了项目ID）
+  const filteredIdentifiers = projectId
+    ? identifiers.filter(id => id.project_id === projectId)
+    : identifiers;
+  
+  return { success: true, identifiers: filteredIdentifiers };
+};
+
+/**
+ * Get identifiers by batch ID (API compatibility version)
+ */
+export const getIdentifiersByBatchIdWithProject = async (
+  batchId: string, 
+  projectId?: string
+): Promise<{ success: boolean; identifiers: IdentifierInfo[] }> => {
+  const identifiers = await getIdentifiersByBatchId(batchId);
+  
+  // 过滤特定项目的标识符（如果指定了项目ID）
+  const filteredIdentifiers = projectId
+    ? identifiers.filter(id => id.project_id === projectId)
+    : identifiers;
+  
+  return { success: true, identifiers: filteredIdentifiers };
+};
+
+/**
+ * Save identifiers to the database (API compatibility version)
+ */
+export const saveIdentifiers = async (
+  identifiers: Array<Partial<IdentifierInfo> & { file_id: string; original_name: string; surrounding_code: string; custom_id: string }>, 
+  projectId?: string
+): Promise<{ success: boolean; savedCount: number }> => {
+  let savedCount = 0;
+  for (const identifier of identifiers) {
+    await saveIdentifier({
+      ...identifier,
+      project_id: projectId || identifier.project_id || ''
+    } as Omit<IdentifierInfo, 'id' | 'created_at' | 'updated_at'> & { id?: string });
+    savedCount++;
+  }
+  
+  return { success: true, savedCount };
+};
+
+/**
+ * Get files by their status (API compatibility version)
+ */
+export const getFilesByStatus = async (
+  status: FileInfo['status'], 
+  projectId?: string
+): Promise<{ success: boolean; files: FileInfo[] }> => {
+  const allFiles = projectId
+    ? await getFilesByProjectId(projectId)
+    : await listJsonFiles<FileInfo>(FILES_DIR);
+  
+  const filteredFiles = allFiles.filter(file => file.status === status);
+  return { success: true, files: filteredFiles };
+};
+
+/**
+ * Get identifiers by their status (API compatibility version)
+ */
+export const getIdentifiersByStatus = async (
+  status: IdentifierInfo['status'], 
+  projectId?: string
+): Promise<{ success: boolean; identifiers: IdentifierInfo[] }> => {
+  const allIdentifiers = await listJsonFiles<IdentifierInfo>(IDENTIFIERS_DIR);
+  
+  const filteredIdentifiers = allIdentifiers.filter(id => 
+    id.status === status && (!projectId || id.project_id === projectId)
+  );
+  
+  return { success: true, identifiers: filteredIdentifiers };
+};
+
+/**
+ * Get all files (API compatibility version)
+ */
+export const getFiles = async (
+  projectId?: string
+): Promise<{ success: boolean; files: FileInfo[] }> => {
+  const files = projectId
+    ? await getFilesByProjectId(projectId)
+    : await listJsonFiles<FileInfo>(FILES_DIR);
+  
+  return { success: true, files };
+};
+
+/**
+ * Get all folders (API compatibility version)
+ */
+export const getFolders = async (
+  projectId?: string
+): Promise<{ success: boolean; folders: string[] }> => {
+  const filesResult = await getFiles(projectId);
+  
+  // 提取文件夹路径并去重
+  const folderSet = new Set<string>();
+  filesResult.files.forEach(file => {
+    const folderPath = path.dirname(file.path);
+    folderSet.add(folderPath);
+  });
+  
+  return { success: true, folders: Array.from(folderSet) };
+};
+
+/**
+ * Get batch requests (API compatibility version)
+ */
+export const getBatchRequests = async (
+  projectId?: string
+): Promise<{ success: boolean; requests: BatchRequestInfo[] }> => {
+  const requests = await listJsonFiles<BatchRequestInfo>(BATCH_REQUESTS_DIR);
+  
+  const filteredRequests = projectId
+    ? requests.filter(req => req.project_id === projectId)
+    : requests;
+  
+  return { success: true, requests: filteredRequests };
+};
+
+/**
+ * Get batch responses (API compatibility version)
+ */
+export const getBatchResponses = async (
+  projectId?: string
+): Promise<{ success: boolean; responses: BatchResponseInfo[] }> => {
+  const responses = await listJsonFiles<BatchResponseInfo>(BATCH_RESPONSES_DIR);
+  
+  const filteredResponses = projectId
+    ? responses.filter(res => res.project_id === projectId)
+    : responses;
+  
+  return { success: true, responses: filteredResponses };
+}; 

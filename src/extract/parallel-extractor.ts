@@ -5,6 +5,7 @@ import * as fs from 'fs/promises';
 import { verbose } from '../utils/logger';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import { v4 as uuidv4 } from 'uuid';
 
 // 获取当前文件的路径
 const __filename = fileURLToPath(import.meta.url);
@@ -31,7 +32,7 @@ export interface ExtractorTaskResult {
 export class ParallelExtractor extends EventEmitter {
   private concurrency: number;
   private runId: string;
-  private projectId?: string;
+  private projectId: string;
   private workers: Worker[];
   private activeWorkers: number = 0;
   private taskQueue: any[] = [];
@@ -42,7 +43,7 @@ export class ParallelExtractor extends EventEmitter {
     super();
     this.concurrency = options.concurrency;
     this.runId = options.runId;
-    this.projectId = options.projectId;
+    this.projectId = options.projectId || '';
     this.workers = [];
   }
 

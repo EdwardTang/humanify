@@ -1,0 +1,155 @@
+---
+description: We  distill the analysis of the GitHub Copilot reverse engineering repositories' approaches into a set of practical, technical project rules specifically tailored for reverse engineering Cursor IDE. I’ve incorporated the tone, technical depth, and best practices gleaned from the copilot-analysis repositories (as seen in the [copilot-analysis](citeturn0fetch0) and [copilot-analysis-new](https://github.com/mengjian-github/copilot-analysis-new)) and merged them with our “cursor rules” (which emphasize concise, TypeScript-first, functional and declarative coding).    The guidelines below are meant to serve as a reference for our reverse engineering agents working on Cursor. They combine deep technical insights—such as splitting bundled code, identifying module dependencies, and AST-based deobfuscation—with project-specific rules that ensure consistency, performance, and clarity.
+globs: *.js,*.ts
+alwaysApply: false
+---
+<!-- # Your rule content
+- You can @ files here
+- You can use markdown but dont have to -->
+
+# Cursor Reverse Engineering Project Rules
+
+This document defines best practices and guidelines for reverse engineering the Cursor IDE. These rules draw on our analysis of Cursor’s integration with LLMs, VSCode fork architecture, UI components, cost optimization strategies, and lessons learned from the GitHub Copilot reverse engineering efforts.
+
+## 1. General Principles
+
+- **Technical Focus:** Treat the project as a complex system where AI integration, modularity, and performance are paramount.
+- **Documentation & Clarity:** Maintain clear markdown documentation (as this file) to guide future reverse engineering efforts.
+- **Consistent Style:** Follow our established coding style guidelines (see Section 2) to ensure all code and analysis are concise, TypeScript-first, and functionally oriented.
+- **Iterative Analysis:** Break down bundled code (e.g., webpack bundles) using AST parsing, module extraction, and targeted dependency analysis—mirroring methods seen in [copilot-analysis](mdc:citeturn0fetch0) and [copilot-analysis-new](mdc:https:/github.com/mengjian-github/copilot-analysis-new).
+
+## 2. Code Style and Structure
+
+- **Language & Tools:** Use TypeScript, Node.js, and modern React (with Next.js App Router) for any tooling or analysis apps. Always import using functional and declarative patterns.
+- **File Organization:**
+  - **Directories:** Use lowercase with dashes (e.g., `analysis/modules`).
+  - **Components & Helpers:** Export components, subcomponents, helpers, static content, and types separately.
+- **Naming Conventions:** 
+  - Variables should be descriptive and include auxiliary verbs (e.g., `isAnalyzed`, `hasDependency`).
+  - Use named exports for all components.
+- **TypeScript Specifics:**
+  - Use interfaces (prefer interfaces over types).
+  - Avoid enums—use maps or constant objects instead.
+  - Write pure functions with the `function` keyword.
+
+## 3. Reverse Engineering Techniques
+
+Inspired by the copilot-analysis repositories, the following technical methods should be applied:
+
+### 3.1 Module Extraction & AST Analysis
+
+- **AST Parsing:** Utilize Babel’s parser to convert bundled or minified Cursor code into an AST.
+  
+  ```typescript
+  import { parse } from "@babel/parser";
+  const ast = parse(sourceCode, { sourceType: "module", plugins: ["typescript"] });
+  ```
+  
+- **Module Splitting:** Traverse the AST to isolate `__webpack_modules__` (or equivalent) and extract each module into a separate file. Use Babel Traverse and Generator to rebuild clean, deobfuscated code.
+
+- **Dependency Resolution:** Identify and remap obfuscated `require` calls by:
+  - Replacing generic parameters (e.g., `e`, `t`, `n`) with meaningful names (`module`, `exports`, `require`).
+  - Building a mapping file (or using GPT-assisted inference) to substitute module IDs with semantic names.
+
+### 3.2 Syntax Optimization
+
+- **Deobfuscation Patterns:** Apply transformations similar to those used in copilot-analysis:
+  - Convert comma operators, logical expressions, and ternary conditions into clear, multi-statement constructs.
+  - Split multi-variable declarations into separate statements for clarity.
+  
+  Example helper:
+  ```typescript
+  function deobfuscate(ast: any): any {
+    // Traverse and replace patterns to produce readable code
+    // e.g., transform a comma-expression into multiple statements.
+    return ast;
+  }
+  ```
+  
+- **Renaming & Formatting:** Implement guard clauses and early returns when processing modules to handle errors gracefully and log exceptions for debugging.
+
+### 3.3 Caching and Incremental Analysis
+
+- **Cache Intermediate Results:** When analyzing repeated patterns (like indexing symbols or module dependencies), cache AST transformations to avoid reprocessing.
+- **Incremental Summarization:** For multi-file analysis, use summarization techniques to maintain context without incurring massive token costs.
+
+## 4. UI, LLM Integration, and Cost Optimization
+
+- **UI Reverse Engineering:** Analyze Cursor’s custom UI components (chat sidebar, inline diff, Composer) using the same principles as VSCode extension analysis:
+  - Use React with Tailwind CSS, Radix UI, and shadcn UI for prototype interfaces that mimic Cursor’s behavior.
+  - Create small demo components to simulate key events (e.g., Tab acceptance, Ctrl+K inline edits) for testing reverse engineered features.
+  
+- **LLM Request Patterns:**
+  - Examine how Cursor constructs its prompt (including `.cursorrules` injection and semantic codebase indexing) and re-create similar context aggregation logic.
+  - Emulate cost optimization techniques by batching requests, summarizing context, and selecting lightweight models for autocomplete.
+  
+- **Performance Strategies:** 
+  - Identify areas where Cursor reduces token usage (e.g., inline vs. full chat modes) and model this in our reverse engineering analysis.
+  - Propose caching and batching strategies to ensure a responsive reverse engineering toolchain.
+
+## 5. Integration with AI SDKs and Zod
+
+- **LLM SDK Patterns:** Follow our AI SDK integration patterns when generating JSON or text from LLMs.
+  
+  For JSON generation:
+  ```typescript
+  import { openai } from "@ai-sdk/openai";
+  import { generateObject } from "ai";
+  import { z } from "zod";
+  
+  const { object } = await generateObject({
+    model: openai("gpt-4o"),
+    schema: z.object({
+      analysis: z.object({
+        moduleCount: z.number(),
+        keyFindings: z.array(z.string()),
+      }),
+    }),
+    prompt: "Analyze the key modules of Cursor IDE.",
+  });
+  ```
+  
+  For text generation:
+  ```typescript
+  import { openai } from "@ai-sdk/openai";
+  import { generateText } from "ai";
+  
+  const { text } = await generateText({
+    model: openai("gpt-4o-mini"),
+    prompt: "Summarize the reverse engineering strategy for Cursor IDE.",
+  });
+  ```
+
+- **Error Handling & Validation:** Always use Zod to create schemas for data—both client and server. Handle errors early and log detailed messages.
+
+## 6. Git and Collaboration Workflow
+
+When working on reverse engineering artifacts or submitting analysis code:
+  
+1. **Check git status:** Confirm changes.
+2. **Stage changes:** Use `git add .` if needed.
+3. **Commit:** Create concise commit messages.
+4. **Push & Create PR:** Use the GitHub CLI following the pattern:
+   ```
+   gh pr create --title "Refactor Cursor module extraction" --body "Detailed reverse engineering and refactoring of Cursor modules based on copilot-analysis techniques."
+   ```
+  
+Follow these steps consistently to maintain a clear audit trail of all changes.
+
+## 7. Final Notes
+
+- **Maintain Markdown Integrity:** Do not modify provided markdown files; use them solely for reference.
+- **Stay Updated:** Reverse engineering is iterative. Document new findings and update these guidelines as Cursor evolves.
+- **Collaboration:** Share insights on GitHub Discussions and pull requests to refine our collective understanding of Cursor’s architecture.
+
+---
+
+These rules aim to align our reverse engineering efforts with industry best practices while leveraging the clever techniques from Copilot’s reverse engineering analysis. By adhering to these guidelines, our agents can produce consistent, high-quality analysis that both demystifies Cursor’s inner workings and provides actionable insights.
+
+---
+
+References:
+- GitHub Copilot Analysis: [copilot-analysis](mdc:citeturn0fetch0)
+- GitHub Copilot Analysis New: [copilot-analysis-new](mdc:https:/github.com/mengjian-github/copilot-analysis-new)
+
+

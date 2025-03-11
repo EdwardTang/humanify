@@ -1,0 +1,10 @@
+{
+  "status": "running",
+  "config": "{\"test\":true}",
+  "total_files": 10,
+  "processed_files": 0,
+  "failed_files": 0,
+  "project_id": "test-project",
+  "start_time": "2025-03-11T05:25:54.852Z",
+  "id": "1f5c0272-57dd-4e20-a0ff-5aa339311bd9"
+}
