@@ -13,6 +13,24 @@ const traverse: typeof babelTraverse.default.default = (
     : babelTraverse.default.default
 ) as any; // eslint-disable-line @typescript-eslint/no-explicit-any -- This hack is because of how the module is exported
 
+// New enum to classify identifier roles
+export enum SemanticRole {
+  ERROR_PARAM = "ERROR_PARAM",        // e.g., catch(e) {}
+  EVENT_PARAM = "EVENT_PARAM",        // e.g., function(e) { e.preventDefault() }
+  ITERATOR = "ITERATOR",              // e.g., for(let i = 0; i < 10; i++)
+  TEMPORARY = "TEMPORARY",            // e.g., let t = x; return t * 2;
+  CONDITION_RESULT = "CONDITION_RESULT", // e.g., const r = condition ? a : b;
+  CALLBACK_PARAM = "CALLBACK_PARAM",  // e.g., function(cb) { cb(); } or setTimeout(() => {}, t)
+  PROMISE_RESOLVER = "PROMISE_RESOLVER", // e.g., new Promise((r, j) => {})
+  OBJECT_CONTEXT = "OBJECT_CONTEXT",  // e.g., const t = this; t.method()
+  DOM_ELEMENT = "DOM_ELEMENT",        // e.g., const e = document.getElementById()
+  INDEX_REFERENCE = "INDEX_REFERENCE", // e.g., arr[n] or mapping indices
+  MODULE_ALIAS = "MODULE_ALIAS",      // e.g., import * as m from 'module'
+  DESTRUCTURED_PARAM = "DESTRUCTURED_PARAM", // e.g., const { a, b: r } = obj;
+  UNKNOWN = "UNKNOWN",                 // Default case
+  NO_NEED_TO_RENAME = "NO_NEED_TO_RENAME" // e.g., const x = 1;
+}
+
 export interface IdentifierWithContext {
   name: string;
   surroundingCode: string;
@@ -21,6 +39,7 @@ export interface IdentifierWithContext {
     column: number;
     filePath?: string;
   };
+  semanticRole?: string;
 }
 
 export interface StreamCollectorOptions {
@@ -32,6 +51,108 @@ export interface StreamCollectorOptions {
   onProgress?: (progress: number) => void;
   // Directory to store temporary files
   tempDir?: string;
+  // Source information (file path or name)
+  sourceInfo?: string;
+}
+
+/**
+ * Identifies the semantic role of an identifier based on its context and usage
+ * This helps provide better context for renaming short identifiers
+ */
+function identifySemanticRole(path: babelTraverse.NodePath<Identifier>): string {
+  const name = path.node.name;
+  
+  // Skip identifiers that are already descriptive (length > 2)
+  if (name.length > 2) {
+    return SemanticRole.NO_NEED_TO_RENAME;
+  }
+  
+  verbose.log(`Analyzing semantic role for identifier '${name}'...`);
+  
+  // Check if this is a catch parameter
+  if (path.parentPath && path.parentPath.isCatchClause() && path.parentPath.get('param') === path) {
+    verbose.log(`Identified '${name}' as ERROR_PARAM in catch clause`);
+    return SemanticRole.ERROR_PARAM;
+  }
+  
+  // Check if this is likely an event parameter
+  if (name === 'e' || name === 'evt' || name === 'event') {
+    // Check usage in the function body
+    const functionParent = path.getFunctionParent();
+    if (functionParent) {
+      // Get the function body as a string
+      const functionBodyCode = functionParent.toString();
+      
+      // Check for common event method calls
+      if (
+        functionBodyCode.includes(`${name}.preventDefault()`) ||
+        functionBodyCode.includes(`${name}.stopPropagation()`) ||
+        functionBodyCode.includes(`${name}.target`) ||
+        functionBodyCode.includes(`${name}.currentTarget`) ||
+        functionBodyCode.includes(`${name}.clientX`) ||
+        functionBodyCode.includes(`${name}.clientY`) ||
+        functionBodyCode.includes(`${name}.keyCode`) ||
+        functionBodyCode.includes(`${name}.which`)
+      ) {
+        verbose.log(`Identified '${name}' as EVENT_PARAM with event method usage`);
+        return SemanticRole.EVENT_PARAM;
+      }
+    }
+  }
+  
+  // Check if this is an iterator
+  if ((name === 'i' || name === 'j' || name === 'k') && path.findParent(p => p.isForStatement() || p.isForInStatement() || p.isForOfStatement())) {
+    verbose.log(`Identified '${name}' as ITERATOR in loop context`);
+    return SemanticRole.ITERATOR;
+  }
+  
+  // Check if this is a temporary variable
+  if ((name === 't' || name === 'tmp' || name === 'temp') && 
+      path.findParent(p => p.isVariableDeclarator() && p.get('id') === path)) {
+    verbose.log(`Identified '${name}' as TEMPORARY variable`);
+    return SemanticRole.TEMPORARY;
+  }
+  
+  // Check if this is a condition result
+  if ((name === 'r' || name === 'result') && 
+      path.findParent(p => p.isVariableDeclarator() && p.get('init')?.isConditionalExpression())) {
+    verbose.log(`Identified '${name}' as CONDITION_RESULT from conditional expression`);
+    return SemanticRole.CONDITION_RESULT;
+  }
+  
+  // Check if this is a DOM element reference
+  if ((name === 'el' || name === 'elem' || name === 'e') && 
+      path.findParent(p => {
+        if (!p.isVariableDeclarator()) return false;
+        const init = p.get('init');
+        return init?.isCallExpression() && 
+              (init.get('callee').toString().includes('getElementById') ||
+               init.get('callee').toString().includes('querySelector'));
+      })) {
+    verbose.log(`Identified '${name}' as DOM_ELEMENT with DOM query usage`);
+    return SemanticRole.DOM_ELEMENT;
+  }
+  
+  // Enhance detection for function parameters with single letters
+  // Common single-letter parameters often follow patterns
+  if (path.parentPath && path.parentPath.isFunction() && path.parentPath.get('params').includes(path)) {
+    const functionBody = path.parentPath.get('body').toString();
+    
+    // Check for this-related contexts
+    if (name === 't' && functionBody.includes(`${name}.`)) {
+      verbose.log(`Identified '${name}' as OBJECT_CONTEXT in function parameter`);
+      return SemanticRole.OBJECT_CONTEXT;
+    }
+    
+    // Check for callback patterns
+    if ((name === 'cb' || name === 'fn') && functionBody.includes(`${name}(`)) {
+      verbose.log(`Identified '${name}' as CALLBACK_PARAM in function parameter`);
+      return SemanticRole.CALLBACK_PARAM;
+    }
+  }
+  
+  verbose.log(`No specific semantic role identified for '${name}', using UNKNOWN`);
+  return SemanticRole.UNKNOWN;
 }
 
 /**
@@ -46,14 +167,16 @@ export async function collectIdentifiersFromStream(
     chunkReadSize = 1024 * 1024, // Default to 1MB chunks for reading
     contextWindowSize,
     onProgress,
-    tempDir = "./.humanify-temp"
+    tempDir = "./.humanify-temp",
+    sourceInfo
   } = options;
 
   // Ensure temp directory exists
   await fs.promises.mkdir(tempDir, { recursive: true });
   
-  // Create a temporary file to store identifiers
-  const tempFilePath = path.join(tempDir, `identifiers-${path.basename(filePath)}.jsonl`);
+  // Create a temporary file to store identifiers with source info if available
+  const sourceIndicator = sourceInfo ? `-${sourceInfo.replace(/[<>:"/\\|?*]/g, '-')}` : '';
+  const tempFilePath = path.join(tempDir, `identifiers-${path.basename(filePath)}${sourceIndicator}.jsonl`);
   
   verbose.log(`Starting stream-based identifier collection for ${filePath}`);
   
@@ -201,7 +324,10 @@ async function extractIdentifiersFromCode(
         // Extract surrounding code
         const surroundingCode = extractSurroundingCode(code, path.node, contextWindowSize);
         
-        // Add to the list of identifiers
+        // Identify semantic role for this identifier
+        const semanticRole = identifySemanticRole(path);
+        
+        // Add to the list of identifiers with semantic role
         identifiers.push({
           name,
           surroundingCode,
@@ -210,6 +336,7 @@ async function extractIdentifiersFromCode(
             column: path.node.loc?.start.column || 0,
             filePath,
           },
+          semanticRole,
         });
       },
     });
@@ -257,29 +384,54 @@ function isReservedKeyword(name: string): boolean {
 /**
  * Stream-based wrapper around collectIdentifiersFromStream that processes
  * a code string directly (for testing and compatibility)
+ * @param code - The JavaScript code string to process
+ * @param options - Processing options
+ * @returns Promise resolving to array of identifiers with context
  */
 export async function collectIdentifiersFromString(
   code: string,
   options: Omit<StreamCollectorOptions, "tempDir">
 ): Promise<IdentifierWithContext[]> {
-  const tempDir = "./.humanify-temp-string";
+  // Determine cursor version from environment or default
+  const cursorVersion = process.env.CURSOR_VERSION || "0.47.7";
+  
+  // Create a more descriptive temporary directory with timestamp and context
+  const timestamp = Date.now();
+  const operation = "identifier-collection";
+  const context = "string-source";
+  const tempDir = path.resolve(`./.humanify-cursor_v${cursorVersion}-${operation}-${context}-${timestamp}`);
   await fs.promises.mkdir(tempDir, { recursive: true });
   
-  // Write code to a temporary file
-  const tempFilePath = path.join(tempDir, `temp-code-${Date.now()}.js`);
+  // Create a safe temporary filename that always starts with "temp-"
+  const tempFileName = `temp-code-${timestamp}.js`;
+  const tempFilePath = path.join(tempDir, tempFileName);
+  
+  verbose.log(`Writing code to temporary file: ${tempFilePath}`);
   await fs.promises.writeFile(tempFilePath, code);
   
   try {
     // Use the stream collector
-    return await collectIdentifiersFromStream(tempFilePath, {
+    verbose.log(`Collecting identifiers from temp file: ${tempFilePath}`);
+    const result = await collectIdentifiersFromStream(tempFilePath, {
       ...options,
       tempDir,
     });
+    verbose.log(`Found ${result.length} identifiers in temp file`);
+    return result;
   } finally {
     // Clean up
     try {
+      verbose.log(`Cleaning up temporary file: ${tempFilePath}`);
       await fs.promises.unlink(tempFilePath);
-      await fs.promises.rmdir(tempDir);
+      
+      // Only try to remove the directory if it's empty
+      const files = await fs.promises.readdir(tempDir);
+      if (files.length === 0) {
+        await fs.promises.rmdir(tempDir);
+        verbose.log(`Removed empty temp directory: ${tempDir}`);
+      } else {
+        verbose.log(`Temp directory not empty, skipping removal: ${tempDir}`);
+      }
     } catch (error) {
       verbose.log(`Error cleaning up temporary files: ${error}`);
     }

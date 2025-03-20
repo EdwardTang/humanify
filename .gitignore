@@ -84,7 +84,7 @@ test/temp/
 humanify-test/
 cursor-0.4* 
 latest_cursor
-.humanify-rename-map.json
+.humanify-*-rename-map.json
 .humanify-temp
 .humanify-temp-string
 
@@ -98,3 +98,6 @@ cursor_0.47.5_app
 cursor_0.47.6_app
 cursor_0.47.7_app
 cursor_0.47.8_app
+processed_chunks
+processed_chunks_fixed
+processed_fixed

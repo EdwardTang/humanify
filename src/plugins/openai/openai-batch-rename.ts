@@ -24,7 +24,119 @@ import * as fsSync from "fs"; // Import native fs for sync operations
 const globalRenameMap = new Map<string, Map<string, string>>();
 
 // Path to store the global rename map for persistence
-const RENAME_MAP_PATH = "./.humanify-rename-map.json";
+const RENAME_MAP_PATH = `./.humanify-cursor_v${process.env.CURSOR_VERSION || "0.47.7"}-rename-map.json`;
+
+// Map of common single-letter identifiers to fallback names based on semantic role
+const fallbackRenameMap: Record<string, Record<string, string>> = {
+  'e': {
+    'ERROR_PARAM': 'errorObj',
+    'EVENT_PARAM': 'event',
+    'DOM_ELEMENT': 'element',
+    'default': 'param'
+  },
+  't': {
+    'TEMPORARY': 'tempValue',
+    'OBJECT_CONTEXT': 'thisContext',
+    'default': 'temp'
+  },
+  'i': {
+    'ITERATOR': 'index',
+    'default': 'iterator'
+  },
+  'j': {
+    'ITERATOR': 'innerIndex',
+    'default': 'jValue'
+  },
+  'k': {
+    'ITERATOR': 'outerIndex',
+    'default': 'key'
+  },
+  'r': {
+    'CONDITION_RESULT': 'result',
+    'PROMISE_RESOLVER': 'resolve',
+    'default': 'returnValue'
+  },
+  'n': {
+    'INDEX_REFERENCE': 'position',
+    'default': 'number'
+  },
+  'p': {
+    'default': 'param'
+  },
+  'v': {
+    'default': 'value'
+  },
+  'x': {
+    'INDEX_REFERENCE': 'xPosition',
+    'default': 'xValue'
+  },
+  'y': {
+    'INDEX_REFERENCE': 'yPosition',
+    'default': 'yValue'
+  },
+  'cb': {
+    'CALLBACK_PARAM': 'callback',
+    'default': 'callback'
+  },
+  'fn': {
+    'CALLBACK_PARAM': 'functionCallback',
+    'default': 'function'
+  },
+  'el': {
+    'DOM_ELEMENT': 'element',
+    'default': 'element'
+  }
+};
+
+/**
+ * Forces renaming of single-letter identifiers if they weren't renamed by the LLM
+ * This ensures we don't leave any short names in the output
+ */
+function applyFallbackRename(
+  originalName: string, 
+  currentName: string, 
+  semanticRole?: string
+): string {
+  // If the name was already changed to something descriptive, keep it
+  if (currentName !== originalName && currentName.length > 2) {
+    verbose.log(`Keeping existing rename for '${originalName}' -> '${currentName}'`);
+    return currentName;
+  }
+  
+  // If original name is already descriptive (>2 chars), keep it
+  if (originalName.length > 2) {
+    return currentName;
+  }
+  
+  verbose.log(`Applying fallback rename for short identifier '${originalName}' -> '${currentName}' with role ${semanticRole || 'UNKNOWN'}`);
+  
+  // Check if we have a fallback for this identifier
+  if (fallbackRenameMap[originalName]) {
+    // If we have role-specific fallback, use it
+    if (semanticRole && fallbackRenameMap[originalName][semanticRole]) {
+      const newName = fallbackRenameMap[originalName][semanticRole];
+      verbose.log(`Using role-specific fallback: '${originalName}' -> '${newName}' (role: ${semanticRole})`);
+      return newName;
+    }
+    // Otherwise use the default fallback
+    const defaultName = fallbackRenameMap[originalName]['default'];
+    verbose.log(`Using default fallback: '${originalName}' -> '${defaultName}'`);
+    return defaultName;
+  }
+  
+  // For any other single-letter identifier, append "Value" or use role-based suffix
+  let fallbackName = '';
+  if (semanticRole && semanticRole !== 'UNKNOWN') {
+    // Create name based on role
+    fallbackName = originalName + semanticRole.toLowerCase().replace(/_/g, '');
+    verbose.log(`Generated role-based fallback: '${originalName}' -> '${fallbackName}'`);
+  } else {
+    fallbackName = originalName + 'Value';
+    verbose.log(`Generated generic fallback: '${originalName}' -> '${fallbackName}'`);
+  }
+  
+  return fallbackName;
+}
 
 export interface BatchRenameOptions {
   apiKey: string;
@@ -47,6 +159,7 @@ interface RetryableIdentifier {
   surroundingCode: string;
   retryCount: number;
   scopeId: string;
+  semanticRole?: string;
   // Optional location for compatibility with IdentifierWithContext
   location?: {
     line: number;
@@ -58,14 +171,15 @@ interface RetryableIdentifier {
 // Add a helper function to convert IdentifierWithContext to RetryableIdentifier
 function convertToRetryable(identifier: IdentifierWithContext): RetryableIdentifier {
   // Create a scope ID based on location
-  const { name, surroundingCode, location } = identifier;
+  const { name, surroundingCode, location, semanticRole } = identifier;
   const scopeId = `${location.filePath || "unknown"}:${location.line}:${location.column}`;
   
   return {
     name,
     surroundingCode,
     retryCount: 0,
-    scopeId
+    scopeId,
+    semanticRole
   };
 }
 
@@ -173,31 +287,54 @@ function generateTraceableFileName(filePath: string, suffix: string): string {
     return `unnamed-${suffix}.jsonl`;
   }
   
-  // Parse the path components
+  // Special handling for temp-code files with timestamps
+  if (filePath.includes('temp-code-')) {
+    // Extract just the filename without the path
+    const baseName = path.basename(filePath);
+    // Create a simplified name that avoids problematic prefixes
+    return `temp-${baseName}.${suffix}.jsonl`;
+  }
+  
+  // Get the base filename without path
+  const baseName = path.basename(filePath);
+  
+  // Check if it already follows our cursor version convention
+  if (baseName.startsWith('cursor_v')) {
+    // Just append the suffix for temp files that already follow our convention
+    return `${baseName.replace('.js', '')}-${suffix}.jsonl`;
+  }
+  
+  // Extract version info from path if present
+  const versionMatch = filePath.match(/cursor[_-]v?(\d+\.\d+\.\d+|\d+\.\d+)/);
+  const cursorVersion = versionMatch ? versionMatch[1] : process.env.CURSOR_VERSION || "0.47.7"; // Default version
+  
+  // Extract file components
   const parsedPath = path.parse(filePath);
-  const dirParts = parsedPath.dir.split(path.sep).filter(part => part.length > 0);
+  const fileType = parsedPath.ext.replace('.', '') || 'unknown';
+  const fileName = parsedPath.name;
   
-  // Get the first letter of each directory component
-  const abbreviatedPath = dirParts.map(part => {
-    // For version-like parts (e.g., cursor_0.47.7), keep them intact
-    if (/\d+\.\d+/.test(part)) {
-      return part;
-    }
-    // Otherwise use first letter
-    return part.charAt(0);
-  }).join('-');
+  // Create abbreviated path components
+  const pathComponents = parsedPath.dir.split(path.sep).filter(p => p);
+  const pathFingerprint = pathComponents.length > 0 
+    ? pathComponents.map(p => p.slice(0, 3)).join('-')
+    : 'nopath';
   
-  // Combine with the filename
-  const filename = parsedPath.name + parsedPath.ext;
-  const result = abbreviatedPath 
-    ? `${abbreviatedPath}-${filename}.${suffix}.jsonl` 
-    : `${filename}.${suffix}.jsonl`;
+  // Construct filename starting with version info
+  let result = `cursor_v${cursorVersion}-${pathFingerprint}-${fileName}-${fileType}-${suffix}.jsonl`;
   
-  // Remove any invalid filename characters
-  return result.replace(/[<>:"/\\|?*]/g, '-').replace(/\s+/g, '-');
+  // Sanitize any problematic characters
+  result = result.replace(/[<>:"/\\|?*]/g, '-').replace(/\s+/g, '-');
+  
+  // Final validation to catch any edge cases with problematic prefixes
+  if (result.startsWith('@') || result.startsWith('.')) {
+    result = `temp-${result}`;
+  }
+  
+  verbose.log(`Generated traceable filename: ${result} from path: ${filePath}`);
+  return result;
 }
 
-export function openAIBatchRename({
+export async function openAIBatchRename({
   apiKey,
   baseURL,
   model, // We'll keep this for backward compatibility but it won't be used for batch requests
@@ -205,7 +342,7 @@ export function openAIBatchRename({
   batchSize = 100,
   chunkSize = 500000, // Default to 500KB chunks
   pollInterval = 60000, // 1 minute in milliseconds
-  tempDir = "./.humanify-temp",
+  tempDir = `./.humanify-cursor_v${process.env.CURSOR_VERSION || "0.47.7"}-batch`,
   maxRetries = 3,
   backoffMultiplier = 1.5,
   initialBackoff = 5000, // 5 seconds in milliseconds
@@ -253,6 +390,24 @@ export function openAIBatchRename({
   // Update the saveGlobalRenameMap function to save the nested structure
   async function saveGlobalRenameMap() {
     try {
+      // Add more detailed logging
+      verbose.log(`Starting to save global rename map with ${globalRenameMap.size} identifier entries...`);
+      
+      // Log a few sample entries for debugging
+      let samplesLogged = 0;
+      for (const [name, scopeMap] of globalRenameMap.entries()) {
+        if (samplesLogged < 5) {
+          verbose.log(`Sample entry for '${name}': ${[...scopeMap.entries()].map(([scope, rename]) => 
+            `{scope: ${scope}, rename: ${rename}}`).join(', ')}`);
+          samplesLogged++;
+        }
+      }
+      
+      // Check for empty map
+      if (globalRenameMap.size === 0) {
+        verbose.log(`WARNING: Global rename map is empty! No renames will be saved.`);
+      }
+      
       // Convert nested map to a serializable object
       const mapObject: Record<string, Record<string, string>> = {};
       
@@ -263,9 +418,13 @@ export function openAIBatchRename({
         }
       }
       
+      // Log the size of the JSON being saved
+      const jsonString = JSON.stringify(mapObject, null, 2);
+      verbose.log(`Saving rename map with ${Object.keys(mapObject).length} entries and ${jsonString.length} bytes to ${RENAME_MAP_PATH}`);
+      
       await fsPromises.writeFile(
         RENAME_MAP_PATH,
-        JSON.stringify(mapObject, null, 2)
+        jsonString
       );
       
       // Count total entries across all scopes
@@ -274,9 +433,13 @@ export function openAIBatchRename({
         totalEntries += scopeMap.size;
       }
       
-      verbose.log(`Saved global rename map with ${globalRenameMap.size} identifiers and ${totalEntries} total scope entries`);
+      verbose.log(`Successfully saved global rename map with ${globalRenameMap.size} identifiers and ${totalEntries} total scope entries`);
     } catch (error) {
-      verbose.log(`Error saving global rename map: ${error}`);
+      verbose.log(`ERROR saving global rename map: ${error}`);
+      // Log additional error details if available
+      if (error instanceof Error && error.stack) {
+        verbose.log(`Error stack: ${error.stack}`);
+      }
     }
   }
 
@@ -287,7 +450,7 @@ export function openAIBatchRename({
     await new Promise(resolve => setTimeout(resolve, delay));
   }
 
-  return async (code: string): Promise<string> => {
+  return async (code: string, filePath?: string): Promise<string> => {
     // Load the global rename map at the start
     await loadGlobalRenameMap();
 
@@ -306,6 +469,7 @@ export function openAIBatchRename({
         // Collect identifiers using stream approach
         const identifiersWithContext = await collectIdentifiersFromString(code, {
           contextWindowSize,
+          sourceInfo: filePath || 'direct-code-input', // Pass the current file path or a meaningful default
           onProgress: (progress) => {
             showPercentage(progress * 0.5); // First 50% for collection
           }
@@ -367,7 +531,7 @@ export function openAIBatchRename({
 
     // Finally, apply all renames in a second pass
     verbose.log("Applying renames from global rename map");
-    const finalCode = await visitAllIdentifiers(
+    let finalCode = await visitAllIdentifiers(
       code,
       async (name, _surroundingCode, scopeId) => {
         // Get the most specific rename available
@@ -395,6 +559,470 @@ export function openAIBatchRename({
 
     verbose.log("Renaming completed");
     await saveGlobalRenameMap();
+
+    // After all processing is done, perform final post-processing scan with dead letter queue approach
+    try {
+      verbose.log(`Starting enhanced post-processing scan for remaining short identifiers...`);
+      
+      // Parse the finalCode to find any remaining short identifiers
+      const ast = parse(finalCode, {
+        sourceType: "module",
+        plugins: ["jsx", "typescript", "classProperties", "decorators-legacy"],
+      });
+      
+      // Track all remaining short identifiers
+      const remainingShortIds = new Set<string>();
+      
+      // Map to track identifier locations for adding comments later
+      const identifierLocations = new Map<string, Array<{start: number, end: number}>>();
+      
+      // Common single-letter identifiers we should always check for
+      const commonSingleLetterIds = ['e', 't', 'i', 'j', 'k', 'r', 'n', 'p', 'v', 'x', 'y'];
+      
+      // Add common identifiers to check list
+      for (const id of commonSingleLetterIds) {
+        remainingShortIds.add(id);
+      }
+      
+      // Traverse to find all identifiers and their locations
+      traverse(ast, {
+        Identifier(path) {
+          const name = path.node.name;
+          
+          // Skip if not a variable/parameter name that should be renamed
+          if (
+            path.parentPath?.isImportSpecifier() || 
+            path.parentPath?.isImportDefaultSpecifier() ||
+            (path.parentPath?.isMemberExpression() && path.parentPath.get('property') === path) ||
+            (path.parent && path.parent.type === 'ObjectProperty' && path.parent.key === path.node && !path.parent.computed)
+          ) {
+            return;
+          }
+          
+          // Check if it's a short identifier (1-2 chars)
+          if (name.length <= 2 && /^[a-zA-Z][a-zA-Z0-9]?$/.test(name)) {
+            remainingShortIds.add(name);
+            
+            // Store location for potential comment insertion later
+            if (path.node.start !== undefined && path.node.end !== undefined) {
+              if (!identifierLocations.has(name)) {
+                identifierLocations.set(name, []);
+              }
+              identifierLocations.get(name)!.push({
+                start: path.node.start ?? 0,
+                end: path.node.end ?? 0
+              });
+            }
+          }
+        }
+      });
+      
+      // FIRST LOOP: Apply existing renames from the global rename map
+      if (remainingShortIds.size > 0) {
+        verbose.log(`LOOP 1: Found ${remainingShortIds.size} short identifiers to check: ${[...remainingShortIds].join(', ')}`);
+        
+        // Check which identifiers are already in the global rename map
+        const mappedIdentifiers = new Set<string>();
+        
+        for (const shortId of remainingShortIds) {
+          if (globalRenameMap.has(shortId)) {
+            mappedIdentifiers.add(shortId);
+            verbose.log(`Found existing rename for '${shortId}' in global map`);
+          }
+        }
+        
+        // Remove mapped identifiers from remaining list
+        for (const mappedId of mappedIdentifiers) {
+          remainingShortIds.delete(mappedId);
+        }
+        
+        verbose.log(`LOOP 1: Applied ${mappedIdentifiers.size} existing renames, ${remainingShortIds.size} identifiers remain`);
+      }
+      
+      // SECOND LOOP: Try using o1 model in batch mode for remaining identifiers
+      if (remainingShortIds.size > 0) {
+        verbose.log(`LOOP 2: Attempting to rename ${remainingShortIds.size} identifiers with o1 model in batch mode...`);
+        
+        // Convert set to array for processing
+        const remainingIdsArray = Array.from(remainingShortIds);
+        const batchItems: RetryableIdentifier[] = [];
+        
+        // Create batch items with context for each remaining identifier
+        for (const shortId of remainingIdsArray) {
+          let surroundingCode = "";
+          if (identifierLocations.has(shortId) && identifierLocations.get(shortId)!.length > 0) {
+            const firstLocation = identifierLocations.get(shortId)![0];
+            const start = firstLocation.start ?? 0;
+            const end = firstLocation.end ?? 0;
+            const startPos = Math.max(0, start - 150);
+            const endPos = Math.min(finalCode.length, end + 150);
+            surroundingCode = finalCode.substring(startPos, endPos);
+          } else {
+            // Fallback to searching for the identifier in code
+            const regex = new RegExp(`\\b${shortId}\\b`, 'g');
+            const match = regex.exec(finalCode);
+            if (match && match.index !== undefined) {
+              const startPos = Math.max(0, match.index - 150);
+              const endPos = Math.min(finalCode.length, match.index + shortId.length + 150);
+              surroundingCode = finalCode.substring(startPos, endPos);
+            } else {
+              surroundingCode = `function example(${shortId}) { return ${shortId}; }`; // Fallback
+            }
+          }
+          
+          // Create a forced scope ID for this identifier
+          const forcedScopeId = `forced:${filePath || 'unknown'}:${shortId}`;
+          
+          // Add to batch items
+          batchItems.push({
+            name: shortId,
+            surroundingCode,
+            retryCount: 0,
+            scopeId: forcedScopeId
+          });
+        }
+        
+        // Split into batches if needed (standard batch size might be too large for o1)
+        const o1BatchSize = Math.min(20, batchSize); // Smaller batch size for o1 to avoid timeouts
+        const o1Batches: RetryableIdentifier[][] = [];
+        
+        for (let i = 0; i < batchItems.length; i += o1BatchSize) {
+          o1Batches.push(batchItems.slice(i, i + o1BatchSize));
+        }
+        
+        verbose.log(`Created ${o1Batches.length} batches for O1 processing with max ${o1BatchSize} items per batch`);
+        
+        // Failed identifiers container
+        const failedFinalAttempts: RetryableIdentifier[] = [];
+        const successfullyRenamed = new Set<string>();
+        
+        // Process each batch with o1 model
+        for (let batchIdx = 0; batchIdx < o1Batches.length; batchIdx++) {
+          const currentBatch = o1Batches[batchIdx];
+          verbose.log(`Processing O1 batch ${batchIdx + 1} of ${o1Batches.length} with ${currentBatch.length} identifiers`);
+          
+          try {
+            // Get the file path suffix for this batch
+            const batchFileSuffix = `o1-final-batch-${batchIdx}`;
+            const batchFileName = generateTraceableFileName(filePath || 'unknown', batchFileSuffix);
+            const batchFile = path.join(tempDir, batchFileName);
+            
+            // Create batch tasks using the o1 model
+            const batchTasks = currentBatch.map((item, index) => {
+              // When using o1 for batch processing, we can't do the two-step approach 
+              // since we can't chain API calls in a batch, so we'll use a combined prompt
+              // that asks for both description and renaming
+              const combinedPrompt = `You are an expert JavaScript developer. Please complete two tasks:
+
+1. First, identify the purpose of the identifier '${item.name}' in one sentence based on how it's used in the code.
+2. Then, suggest a better, more descriptive name for this identifier in camelCase format.
+
+Original identifier: ${item.name}
+Scope context: ${item.scopeId}
+${item.semanticRole ? `Semantic role: ${item.semanticRole}` : ""}
+
+Surrounding code:
+\`\`\`javascript
+${item.surroundingCode}
+\`\`\`
+
+${item.name.length === 1 ? "IMPORTANT: This is a single-letter identifier that needs a more descriptive name. Do not return single-letter names." : ""}
+
+Respond with ONLY the suggested variable name in camelCase format (e.g., "getUserData"). No explanations or other text.`;
+
+              return {
+                custom_id: `${batchIdx}-${index}`,
+                method: "POST",
+                url: "/v1/chat/completions",
+                body: {
+                  model: "o1",
+                  messages: [{ role: "user", content: combinedPrompt }],
+                  temperature: 0.2,
+                  reasoning_effort: "low"
+                }
+              };
+            });
+            
+            // Write batch file
+            await fsPromises.writeFile(
+              batchFile,
+              batchTasks.map(task => JSON.stringify(task)).join('\n')
+            );
+            
+            verbose.log(`Created O1 batch file: ${batchFile}`);
+            
+            // Upload the batch file
+            const fileUpload = await client.files.create({
+              file: createReadStream(batchFile),
+              purpose: "batch"
+            });
+            
+            verbose.log(`Uploaded O1 batch file with ID: ${fileUpload.id}`);
+            
+            // Create the batch job
+            const batchJob = await client.batches.create({
+              input_file_id: fileUpload.id,
+              endpoint: "/v1/chat/completions",
+              completion_window: "24h"
+            });
+            
+            verbose.log(`Created O1 batch job with ID: ${batchJob.id}`);
+            
+            // Check immediate errors
+            if (batchJob.errors) {
+              verbose.log(`O1 batch job creation returned errors: ${JSON.stringify(batchJob.errors)}`);
+              throw new Error(`O1 batch job creation failed with errors`);
+            }
+            
+            // Poll for completion with exponential backoff
+            let completed = false;
+            let pollRetryCount = 0;
+            
+            while (!completed) {
+              try {
+                const jobStatus = await client.batches.retrieve(batchJob.id);
+                verbose.log(`O1 batch job status: ${jobStatus.status}`);
+                
+                if (jobStatus.status === "completed") {
+                  if (jobStatus.output_file_id) {
+                    // Get the results
+                    const resultContent = await client.files.content(jobStatus.output_file_id);
+                    const resultFileSuffix = `o1-result-${batchIdx}`;
+                    const resultFileName = generateTraceableFileName(filePath || 'unknown', resultFileSuffix);
+                    const resultFile = path.join(tempDir, resultFileName);
+                    
+                    // Convert ArrayBuffer to Buffer
+                    const buffer = Buffer.from(await resultContent.arrayBuffer());
+                    await fsPromises.writeFile(resultFile, buffer);
+                    
+                    verbose.log(`Downloaded O1 results to: ${resultFile}`);
+                    
+                    // Parse the results
+                    const resultText = await fsPromises.readFile(resultFile, 'utf-8');
+                    const results = resultText.split('\n')
+                      .filter((line: string) => line.trim())
+                      .map((line: string) => JSON.parse(line));
+                    
+                    // Process the results
+                    for (const result of results) {
+                      // Ignore the batch index part, only need the item index
+                      const itemIdxStr = result.custom_id.split('-')[1];
+                      const itemIdx = Number(itemIdxStr);
+                      const originalItem = currentBatch[itemIdx];
+                      const originalName = originalItem.name;
+                      const scopeId = originalItem.scopeId;
+                      
+                      if (result.error) {
+                        verbose.log(`Error in O1 processing for '${originalName}': ${result.error.message}`);
+                        failedFinalAttempts.push(originalItem);
+                      } else {
+                        try {
+                          const content = result.response.body.choices[0].message.content?.trim();
+                          
+                          // Validate the suggested name
+                          if (content && /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(content) && content !== originalName) {
+                            // Add to global rename map
+                            if (!globalRenameMap.has(originalName)) {
+                              globalRenameMap.set(originalName, new Map());
+                            }
+                            globalRenameMap.get(originalName)!.set(scopeId, content);
+                            
+                            verbose.log(`LOOP 2: Successfully renamed '${originalName}' to '${content}' with o1 model`);
+                            successfullyRenamed.add(originalName);
+                          } else {
+                            verbose.log(`LOOP 2: Invalid name received for '${originalName}' from o1 model: ${content}`);
+                            failedFinalAttempts.push(originalItem);
+                          }
+                        } catch (parseError) {
+                          verbose.log(`LOOP 2: Error parsing result for '${originalName}': ${parseError}`);
+                          failedFinalAttempts.push(originalItem);
+                        }
+                      }
+                    }
+                    
+                    completed = true;
+                  } else {
+                    verbose.log(`O1 job completed but no output file ID found`);
+                    completed = true;
+                  }
+                } else if (jobStatus.status === "failed" || jobStatus.status === "expired") {
+                  verbose.log(`O1 batch job ${jobStatus.status}: ${JSON.stringify(jobStatus.errors || {})}`);
+                  // Add all items in this batch to failed attempts
+                  failedFinalAttempts.push(...currentBatch);
+                  completed = true;
+                } else {
+                  // Wait before polling again
+                  const pollDelay = Math.min(pollInterval, 30000); // Use shorter polling for O1 batches
+                  verbose.log(`Waiting ${pollDelay / 1000} seconds before polling O1 job again...`);
+                  await new Promise(resolve => setTimeout(resolve, pollDelay));
+                }
+              } catch (error) {
+                verbose.log(`Error polling O1 batch job: ${error}`);
+                pollRetryCount++;
+                
+                if (pollRetryCount <= maxRetries) {
+                  // Use exponential backoff for polling retries
+                  await exponentialBackoff(pollRetryCount);
+                } else {
+                  verbose.log(`Max poll retries reached for O1 batch`);
+                  // Move all items to failed identifiers
+                  failedFinalAttempts.push(...currentBatch);
+                  completed = true;
+                }
+              }
+            }
+          } catch (error) {
+            verbose.log(`Error processing O1 batch: ${error}`);
+            // Add all items in this batch to failed attempts
+            failedFinalAttempts.push(...currentBatch);
+          }
+        }
+        
+        // Remove successfully renamed identifiers from remaining set
+        for (const renamedId of successfullyRenamed) {
+          remainingShortIds.delete(renamedId);
+        }
+        
+        verbose.log(`LOOP 2: Successfully renamed ${successfullyRenamed.size} identifiers with o1 model, ${remainingShortIds.size} still remain`);
+        
+        // Save global rename map with o1 additions
+        await saveGlobalRenameMap();
+      }
+      
+      // THIRD LOOP: Add comments for any remaining identifiers
+      if (remainingShortIds.size > 0) {
+        verbose.log(`LOOP 3: Adding comments for ${remainingShortIds.size} remaining short identifiers`);
+        
+        // We need to reapply all the renames first, then add comments
+        let codeWithRenames = finalCode;
+        
+        // First apply all successful renames from the global map
+        codeWithRenames = await visitAllIdentifiers(
+          finalCode,
+          async (name, _surroundingCode, scopeId) => {
+            // Get the most specific rename available
+            if (globalRenameMap.has(name)) {
+              const scopeMap = globalRenameMap.get(name)!;
+              
+              // Try exact scope first
+              if (scopeMap.has(scopeId)) {
+                return scopeMap.get(scopeId)!;
+              }
+              
+              // Try forced scope
+              const forcedScopeId = `forced:${filePath || 'unknown'}`;
+              if (scopeMap.has(forcedScopeId)) {
+                return scopeMap.get(forcedScopeId)!;
+              }
+              
+              // Try default scope as fallback
+              if (scopeMap.has('default')) {
+                return scopeMap.get('default')!;
+              }
+            }
+            
+            return name; // No rename found
+          },
+          contextWindowSize
+        );
+        
+        // After applying renames, we need to add comments for any remaining short identifiers
+        // We'll use string manipulation since we need to add comments, not renames
+        // Sort locations in reverse order to avoid position shifts
+        let codeWithComments = codeWithRenames;
+        
+        // We need to parse again to find the remaining locations after renames
+        const newAst = parse(codeWithRenames, {
+          sourceType: "module",
+          plugins: ["jsx", "typescript", "classProperties", "decorators-legacy"],
+        });
+        
+        // Clear and rebuild the location map for remaining identifiers
+        for (const shortId of remainingShortIds) {
+          identifierLocations.set(shortId, []);
+        }
+        
+        // Find current locations of remaining identifiers
+        traverse(newAst, {
+          Identifier(path) {
+            const name = path.node.name;
+            
+            if (remainingShortIds.has(name) && 
+                path.node.start !== undefined && 
+                path.node.end !== undefined) {
+              
+              identifierLocations.get(name)!.push({
+                start: path.node.start ?? 0,
+                end: path.node.end ?? 0
+              });
+            }
+          }
+        });
+        
+        // For each remaining identifier, add a comment at its first occurrence
+        const commentedIds = new Set<string>();
+        
+        // Collect all locations from all identifiers
+        const allLocations: Array<{id: string, start: number, end: number}> = [];
+        for (const [id, locations] of identifierLocations.entries()) {
+          if (remainingShortIds.has(id)) {
+            // Only use first occurrence of each identifier
+            if (locations.length > 0) {
+              allLocations.push({
+                id,
+                start: locations[0].start,
+                end: locations[0].end
+              });
+            }
+          }
+        }
+        
+        // Sort locations in reverse order (to avoid position shifts)
+        allLocations.sort((a, b) => b.start - a.start);
+        
+        // Add comments
+        for (const location of allLocations) {
+          const id = location.id;
+          
+          // Only add comment if we haven't already for this id
+          if (!commentedIds.has(id)) {
+            const comment = ` /* TODO: Short identifier '${id}' needs manual renaming, automated attempts failed */`;
+            codeWithComments = codeWithComments.slice(0, location.end) + comment + codeWithComments.slice(location.end);
+            commentedIds.add(id);
+            
+            verbose.log(`LOOP 3: Added comment for unresolved identifier '${id}'`);
+          }
+        }
+        
+        // Use the code with comments as the final result
+        finalCode = codeWithComments;
+        
+        verbose.log(`LOOP 3: Added comments for ${commentedIds.size} identifiers that could not be automatically renamed`);
+      }
+      
+      // Ensure we have something in the globalRenameMap if it's empty 
+      if (globalRenameMap.size === 0) {
+        verbose.log(`WARNING: Global rename map is empty! Adding some default entries as a placeholder...`);
+        // Add some default entries to avoid empty maps
+        for (const id of commonSingleLetterIds) {
+          const defaultName = applyFallbackRename(id, id, "UNKNOWN");
+          globalRenameMap.set(id, new Map());
+          globalRenameMap.get(id)!.set("default", defaultName);
+          verbose.log(`Added default rename entry: '${id}' -> '${defaultName}'`);
+        }
+      }
+    } catch (error) {
+      verbose.log(`Error in enhanced post-processing scan: ${error}`);
+    }
+    
+    // One final save to ensure the rename map exists on disk
+    try {
+      await saveGlobalRenameMap();
+      verbose.log(`Final check: rename map with ${globalRenameMap.size} entries saved to ${RENAME_MAP_PATH}`);
+    } catch (mapSaveError) {
+      verbose.log(`ERROR in final rename map save: ${mapSaveError}`);
+    }
+    
     return finalCode;
   };
 
@@ -496,79 +1124,171 @@ export function openAIBatchRename({
     return processedChunk;
   }
   
-  // Update toRenamePrompt to include scope information and use o3-mini
-  function toRenamePrompt(
+  // Update toRenamePrompt to include scope information and use o3-mini in a two-step process
+  async function toRenamePrompt(
+    client: OpenAI,
     name: string,
     surroundingCode: string,
-    scopeId: string
-  ): OpenAI.Chat.Completions.ChatCompletionCreateParams {
-    const prompt = `You are an expert JavaScript developer. Please analyze the following identifier and suggest a better, more descriptive name for it based on how it's used in the code. The identifier may appear multiple times in the code.
+    scopeId: string = "",
+    semanticRole?: string
+  ): Promise<OpenAI.Chat.Completions.ChatCompletionCreateParams> {
+    // Check if this is a single-letter identifier
+    const isSingleLetter = name.length === 1;
+    
+    // Format a semantic role message based on role
+    let roleMessage = "";
+    if (semanticRole) {
+      switch (semanticRole) {
+        case "ERROR_PARAM":
+          roleMessage = "This identifier is a parameter in a catch clause (error object).";
+          break;
+        case "EVENT_PARAM":
+          roleMessage = "This identifier is an event parameter in an event handler function.";
+          break;
+        case "ITERATOR":
+          roleMessage = "This identifier is used as an iterator in a loop.";
+          break;
+        case "TEMPORARY":
+          roleMessage = "This identifier is used as a temporary variable.";
+          break;
+        case "CONDITION_RESULT":
+          roleMessage = "This identifier stores the result of a conditional expression.";
+          break;
+        case "CALLBACK_PARAM":
+          roleMessage = "This identifier is a callback function parameter.";
+          break;
+        case "PROMISE_RESOLVER":
+          roleMessage = "This identifier is a Promise resolver or rejecter parameter.";
+          break;
+        case "OBJECT_CONTEXT":
+          roleMessage = "This identifier stores a reference to 'this' context.";
+          break;
+        case "DOM_ELEMENT":
+          roleMessage = "This identifier references a DOM element.";
+          break;
+        case "INDEX_REFERENCE":
+          roleMessage = "This identifier is used as an index or reference to an array element.";
+          break;
+        case "MODULE_ALIAS":
+          roleMessage = "This identifier is an alias for an imported module.";
+          break;
+        case "DESTRUCTURED_PARAM":
+          roleMessage = "This identifier is part of a destructured parameter or assignment.";
+          break;
+        default:
+          roleMessage = "";
+      }
+    }
+    
+    // Prepare examples message for common single-letter variables only if needed
+    let examplesMessage = "";
+    if (isSingleLetter) {
+      examplesMessage = `
+Examples of good renames for common single-letter identifiers:
+- 'e' in catch clause → 'error', 'err', 'exception'
+- 'e' in event handlers → 'event', 'evt', 'domEvent'
+- 'i' in for loops → 'index', 'counter', 'itemIndex'
+- 't' as temporary variable → 'temp', 'tempValue', 'intermediate'
+- 'r' storing results → 'result', 'returnValue', 'response'
+- 'p' for parameters → 'param', 'options', 'config'
+- 'cb' for callbacks → 'callback', 'onComplete', 'handler'`;
+    }
+
+    // Step 1: Get description of the identifier
+    const descriptionPrompt = `You are an expert JavaScript developer. Your task is to read the following code and write the purpose of the identifier '${name}' in one sentence. Describe what this identifier is used for based on the context.
 
 Original identifier: ${name}
 Scope context: ${scopeId}
+${roleMessage ? `Semantic role: ${roleMessage}` : ""}
 
 Surrounding code:
 \`\`\`javascript
 ${surroundingCode}
 \`\`\`
 
-Respond with only a single word or phrase in camelCase format (e.g., "getUserData", "formatTimestamp", "isValidInput") that would be a good replacement name for this identifier in this specific scope. Do not include explanations, code examples, or additional text.`;
+Respond with only a clear, concise description of what this identifier does or represents.`;
 
-    // Check if the context might benefit from additional file search
-    const needsAdditionalContext = shouldUseFileSearch(name, surroundingCode);
+    // Get description
+    try {
+      const description = await client.chat.completions.create({
+        model: "o3-mini",
+        messages: [{ role: "user", content: descriptionPrompt }],
+        temperature: 0.2
+      });
+      
+      const identifierDescription = description.choices[0]?.message?.content?.trim() || "Unknown identifier purpose";
+      verbose.log(`Description for '${name}': ${identifierDescription}`);
 
-    // Base request configuration
-    const requestConfig: OpenAI.Chat.Completions.ChatCompletionCreateParams = {
-      // Always use o3-mini model regardless of the parameter passed
-      model: "o3-mini",
-      messages: [{ role: "user", content: prompt }],
-      max_completion_tokens: 50
-    };
+      // Step 2: Now create the naming prompt based on the description
+      const namingPrompt = `You are an expert JavaScript developer. Based on the following description, suggest a better, more descriptive name for the identifier.
 
-    // Add tool calling capability if needed
-    if (needsAdditionalContext) {
-      requestConfig.tools = [
-        {
-          type: "function",
-          function: {
-            name: "file_search",
-            description: "Search for additional code references in the codebase",
-            parameters: {
-              type: "object",
-              properties: {
-                query: {
-                  type: "string",
-                  description: "The search query to find relevant code references"
+Original identifier: ${name}
+Description: ${identifierDescription}
+${isSingleLetter ? "IMPORTANT: This is a single-letter identifier that needs a more descriptive name. Do not return single-letter names." : ""}
+${examplesMessage}
+
+Respond with only a single word or phrase in camelCase format (e.g., "getUserData", "formatTimestamp", "isValidInput"). Do not include explanations, code examples, or additional text.`;
+
+      // Check if the context might benefit from additional file search
+      const needsAdditionalContext = shouldUseFileSearch(name, surroundingCode);
+
+      // Base request configuration
+      const requestConfig: OpenAI.Chat.Completions.ChatCompletionCreateParams = {
+        model: "o3-mini",
+        messages: [{ role: "user", content: namingPrompt }],
+        temperature: 0.2 // Lower temperature for more deterministic coding responses
+      };
+
+      // Add tool calling capability if needed
+      if (needsAdditionalContext) {
+        requestConfig.tools = [
+          {
+            type: "function",
+            function: {
+              name: "file_search",
+              description: "Search for additional code references in the codebase",
+              parameters: {
+                type: "object",
+                properties: {
+                  query: {
+                    type: "string",
+                    description: "The search query to find relevant code references"
+                  }
                 },
-                vector_store: {
-                  type: "string",
-                  description: "The vector store ID to search in"
-                }
-              },
-              required: ["query", "vector_store"]
+                required: ["query"]
+              }
             }
           }
-        }
-      ];
-      
-      // Add tool choice to specify we want to use the file_search tool
-      requestConfig.tool_choice = {
-        type: "function",
-        function: {
-          name: "file_search"
-        }
-      };
-      
-      // Add specific instructions in the prompt about which vector store to use
-      requestConfig.messages = [
-        { 
-          role: "user", 
-          content: `${prompt}\n\nWhen using the file_search tool, search in vector store: vs_67d8f1137dd08191a78acb7beca6022b with query: "Function or variable similar to ${name}"`
-        }
-      ];
-    }
+        ];
+      }
 
-    return requestConfig;
+      return requestConfig;
+    } catch (error) {
+      console.error("Error getting identifier description:", error);
+      
+      // Fallback to original approach if description fails
+      const fallbackPrompt = `You are an expert JavaScript developer. Please analyze the following identifier and suggest a better, more descriptive name for it based on how it's used in the code.
+
+Original identifier: ${name}
+Scope context: ${scopeId}
+${roleMessage ? `Semantic role: ${roleMessage}` : ""}
+
+Surrounding code:
+\`\`\`javascript
+${surroundingCode}
+\`\`\`
+${examplesMessage}
+
+${isSingleLetter ? "IMPORTANT: This is a single-letter identifier that needs a more descriptive name. Do not return single-letter names." : ""}
+
+Respond with only a single word or phrase in camelCase format (e.g., "getUserData", "formatTimestamp", "isValidInput"). Do not include explanations, code examples, or additional text.`;
+
+      return {
+        model: "o3-mini",
+        messages: [{ role: "user", content: fallbackPrompt }],
+        temperature: 0.2
+      };
+    }
   }
   
   // Helper function to determine if we need additional context from file search
@@ -610,12 +1330,12 @@ Respond with only a single word or phrase in camelCase format (e.g., "getUserDat
     const batchFileName = generateTraceableFileName(filePath, batchFileSuffix);
     const batchFile = path.join(tempDir, batchFileName);
     
-    const batchTasks = batch.map((item, index) => ({
+    const batchTasks = await Promise.all(batch.map(async (item, index) => ({
       custom_id: `${batchIndex}-${index}`,
       method: "POST",
       url: "/v1/chat/completions",
-      body: toRenamePrompt(item.name, item.surroundingCode, item.scopeId)
-    }));
+      body: await toRenamePrompt(client, item.name, item.surroundingCode, item.scopeId, item.semanticRole)
+    })));
     
     await fsPromises.writeFile(
       batchFile,
@@ -703,6 +1423,7 @@ Respond with only a single word or phrase in camelCase format (e.g., "getUserDat
                   const originalItem = batch[itemIndex];
                   const originalName = originalItem.name;
                   const scopeId = originalItem.scopeId;
+                  const semanticRole = originalItem.semanticRole;
                   
                   if (result.error) {
                     verbose.log(`Error processing ${originalName} in scope ${scopeId}: ${result.error.message}`);
@@ -713,12 +1434,19 @@ Respond with only a single word or phrase in camelCase format (e.g., "getUserDat
                       verbose.log(`Adding ${originalName} in scope ${scopeId} for retry (attempt ${originalItem.retryCount})`);
                       failedIdentifiers.push(originalItem);
                     } else {
-                      // Max retries reached, keep original name
-                      verbose.log(`Max retries reached for ${originalName} in scope ${scopeId}, keeping original`);
+                      // Max retries reached, apply fallback rename for short identifiers
+                      let finalName = originalName;
+                      if (originalName.length <= 2) {
+                        finalName = applyFallbackRename(originalName, originalName, semanticRole);
+                        verbose.log(`Max retries reached for short identifier '${originalName}', using fallback rename: ${finalName}`);
+                      } else {
+                        verbose.log(`Max retries reached for ${originalName} in scope ${scopeId}, keeping original`);
+                      }
+                      
                       if (!globalRenameMap.has(originalName)) {
                         globalRenameMap.set(originalName, new Map());
                       }
-                      globalRenameMap.get(originalName)!.set(scopeId, originalName);
+                      globalRenameMap.get(originalName)!.set(scopeId, finalName);
                     }
                   } else {
                     try {
@@ -741,6 +1469,12 @@ Respond with only a single word or phrase in camelCase format (e.g., "getUserDat
                           }
                         }
                         
+                        // Apply fallback rename if the LLM returned the original name for a short identifier
+                        if (renamed === originalName && originalName.length <= 2) {
+                          renamed = applyFallbackRename(originalName, renamed, semanticRole);
+                          verbose.log(`LLM returned original name for short identifier '${originalName}', using fallback rename: ${renamed}`);
+                        }
+                        
                         // Validate the returned name is valid JS identifier
                         if (renamed && /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(renamed)) {
                           verbose.log(`Renamed ${originalName} in scope ${scopeId} to ${renamed}`);
@@ -749,11 +1483,19 @@ Respond with only a single word or phrase in camelCase format (e.g., "getUserDat
                           }
                           globalRenameMap.get(originalName)!.set(scopeId, renamed);
                         } else {
-                          verbose.log(`Invalid identifier ${renamed} for ${originalName} in scope ${scopeId}, keeping original`);
+                          // Invalid identifier, apply fallback for short identifiers
+                          let finalName = originalName;
+                          if (originalName.length <= 2) {
+                            finalName = applyFallbackRename(originalName, originalName, semanticRole);
+                            verbose.log(`Invalid identifier ${renamed} for short identifier '${originalName}', using fallback: ${finalName}`);
+                          } else {
+                            verbose.log(`Invalid identifier ${renamed} for ${originalName} in scope ${scopeId}, keeping original`);
+                          }
+                          
                           if (!globalRenameMap.has(originalName)) {
                             globalRenameMap.set(originalName, new Map());
                           }
-                          globalRenameMap.get(originalName)!.set(scopeId, originalName);
+                          globalRenameMap.get(originalName)!.set(scopeId, finalName);
                         }
                       }
                     } catch (parseError) {
@@ -764,11 +1506,19 @@ Respond with only a single word or phrase in camelCase format (e.g., "getUserDat
                         originalItem.retryCount++;
                         failedIdentifiers.push(originalItem);
                       } else {
-                        // Max retries reached, keep original name
+                        // Max retries reached, apply fallback rename for short identifiers
+                        let finalName = originalName;
+                        if (originalName.length <= 2) {
+                          finalName = applyFallbackRename(originalName, originalName, semanticRole);
+                          verbose.log(`Error processing short identifier '${originalName}', using fallback rename: ${finalName}`);
+                        } else {
+                          verbose.log(`Max retries reached for ${originalName} in scope ${scopeId}, keeping original`);
+                        }
+                        
                         if (!globalRenameMap.has(originalName)) {
                           globalRenameMap.set(originalName, new Map());
                         }
-                        globalRenameMap.get(originalName)!.set(scopeId, originalName);
+                        globalRenameMap.get(originalName)!.set(scopeId, finalName);
                       }
                     }
                   }
@@ -864,12 +1614,13 @@ Respond with only a single word or phrase in camelCase format (e.g., "getUserDat
     // We'll use a simpler approach for retries - process one at a time
     for (let i = 0; i < failedIdentifiers.length; i++) {
       const item = failedIdentifiers[i];
+      const semanticRole = item.semanticRole;
       verbose.log(`Retrying ${item.name} in scope ${item.scopeId} (attempt ${item.retryCount} of ${maxRetries})`);
       
       try {
         // Correctly handle the response type for newer OpenAI SDK
         const response = await client.chat.completions.create(
-          toRenamePrompt(item.name, item.surroundingCode, item.scopeId)
+          await toRenamePrompt(client, item.name, item.surroundingCode, item.scopeId, item.semanticRole)
         );
         
         try {
@@ -897,6 +1648,12 @@ Respond with only a single word or phrase in camelCase format (e.g., "getUserDat
               }
             }
             
+            // Apply fallback rename if the LLM returned the original name for a short identifier
+            if (renamed === item.name && item.name.length <= 2) {
+              renamed = applyFallbackRename(item.name, renamed, semanticRole);
+              verbose.log(`LLM returned original name for short identifier '${item.name}', using fallback rename: ${renamed}`);
+            }
+            
             // Validate the returned name is valid JS identifier
             if (renamed && /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(renamed)) {
               verbose.log(`Renamed ${item.name} in scope ${item.scopeId} to ${renamed}`);
@@ -905,19 +1662,35 @@ Respond with only a single word or phrase in camelCase format (e.g., "getUserDat
               }
               globalRenameMap.get(item.name)!.set(item.scopeId, renamed);
             } else {
-              verbose.log(`Invalid identifier ${renamed} for ${item.name} in scope ${item.scopeId}, keeping original`);
+              // Invalid identifier, apply fallback for short identifiers
+              let finalName = item.name;
+              if (item.name.length <= 2) {
+                finalName = applyFallbackRename(item.name, item.name, semanticRole);
+                verbose.log(`Invalid identifier ${renamed} for short identifier '${item.name}', using fallback: ${finalName}`);
+              } else {
+                verbose.log(`Invalid identifier ${renamed} for ${item.name} in scope ${item.scopeId}, keeping original`);
+              }
+              
               if (!globalRenameMap.has(item.name)) {
                 globalRenameMap.set(item.name, new Map());
               }
-              globalRenameMap.get(item.name)!.set(item.scopeId, item.name);
+              globalRenameMap.get(item.name)!.set(item.scopeId, finalName);
             }
           }
         } catch (parseError) {
           verbose.log(`Error parsing retry result for ${item.name} in scope ${item.scopeId}: ${parseError}`);
+          
+          // Apply fallback rename for short identifiers that have reached max retries
+          let finalName = item.name;
+          if (item.retryCount >= maxRetries && item.name.length <= 2) {
+            finalName = applyFallbackRename(item.name, item.name, semanticRole);
+            verbose.log(`Error processing short identifier '${item.name}', using fallback rename: ${finalName}`);
+          }
+          
           if (!globalRenameMap.has(item.name)) {
             globalRenameMap.set(item.name, new Map());
           }
-          globalRenameMap.get(item.name)!.set(item.scopeId, item.name);
+          globalRenameMap.get(item.name)!.set(item.scopeId, finalName);
         }
       } catch (error) {
         verbose.log(`Error retrying identifier ${item.name} in scope ${item.scopeId}: ${error}`);
@@ -925,13 +1698,20 @@ Respond with only a single word or phrase in camelCase format (e.g., "getUserDat
         // Exponential backoff for API errors
         await exponentialBackoff(item.retryCount);
         
-        // Keep original name after max retries
+        // Keep original name after max retries, with fallback for short identifiers
         if (item.retryCount >= maxRetries) {
-          verbose.log(`Max retries reached for ${item.name} in scope ${item.scopeId}, keeping original`);
+          let finalName = item.name;
+          if (item.name.length <= 2) {
+            finalName = applyFallbackRename(item.name, item.name, semanticRole);
+            verbose.log(`Max retries reached for short identifier '${item.name}', using fallback rename: ${finalName}`);
+          } else {
+            verbose.log(`Max retries reached for ${item.name} in scope ${item.scopeId}, keeping original`);
+          }
+          
           if (!globalRenameMap.has(item.name)) {
             globalRenameMap.set(item.name, new Map());
           }
-          globalRenameMap.get(item.name)!.set(item.scopeId, item.name);
+          globalRenameMap.get(item.name)!.set(item.scopeId, finalName);
         }
       }
       
