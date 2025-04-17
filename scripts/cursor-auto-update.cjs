@@ -39,6 +39,10 @@ const config = {
   tempReadmePath: path.join(require('os').tmpdir(), 'cursor_readme.md'),
   extractDir: path.join(process.cwd(), 'latest_cursor', 'squashfs-root'),
   versionAppsDir: process.cwd(), // 更改为当前工作目录，而不是用户主目录
+  isMacOS: process.platform === 'darwin',
+  isLinux: process.platform === 'linux',
+  isWindows: process.platform === 'win32',
+  tempMountPoint: path.join(require('os').tmpdir(), 'cursor_dmg_mount')
 };
 
 // Console colors
@@ -189,31 +193,72 @@ function extractVersionInfo(readmeContent) {
   
   const dataRow = lines[2]; // Skip header and separator lines
   
-  // Extract Linux download URL
-  const linuxUrlMatch = dataRow.match(/\[linux-x64\]\((https:\/\/[^)]*)\)/);
-  if (!linuxUrlMatch || linuxUrlMatch.length < 2) {
-    throw new Error('Could not find Linux download URL in README');
+  // Extract the appropriate download URL based on OS
+  let downloadUrl;
+  let installerType;
+  
+  if (config.isMacOS) {
+    // Extract Mac download URL - 支持多种格式模式
+    // 首先尝试darwin-universal格式
+    const macArchType = 'universal';
+    const macUrlRegex = new RegExp(`\\[darwin-${macArchType}\\]\\((https:\\/\\/[^)]*)\\)`);
+    const macUrlMatch = dataRow.match(macUrlRegex);
+    
+    // 如果找不到darwin-universal格式，尝试简单的[mac]格式
+    const simpleMacUrlMatch = dataRow.match(/\[mac\]\((https:\/\/[^)]*)\)/);
+    
+    if (macUrlMatch && macUrlMatch.length >= 2) {
+      downloadUrl = macUrlMatch[1];
+    } else if (simpleMacUrlMatch && simpleMacUrlMatch.length >= 2) {
+      downloadUrl = simpleMacUrlMatch[1];
+    } else {
+      throw new Error('Could not find Mac download URL in README');
+    }
+    
+    installerType = 'dmg';
+  } else if (config.isWindows) {
+    // Extract Windows download URL
+    const winUrlMatch = dataRow.match(/\[win-x64\]\((https:\/\/[^)]*)\)/);
+    if (!winUrlMatch || winUrlMatch.length < 2) {
+      throw new Error('Could not find Windows download URL in README');
+    }
+    downloadUrl = winUrlMatch[1];
+    installerType = 'exe';
+  } else {
+    // Default to Linux
+    const linuxUrlMatch = dataRow.match(/\[linux-x64\]\((https:\/\/[^)]*)\)/);
+    if (!linuxUrlMatch || linuxUrlMatch.length < 2) {
+      throw new Error('Could not find Linux download URL in README');
+    }
+    downloadUrl = linuxUrlMatch[1];
+    installerType = 'AppImage';
   }
   
-  const downloadUrl = linuxUrlMatch[1];
-  
-  // Extract version from URL
+  // Extract version from URL or from version column
   let version;
-  const versionMatch = downloadUrl.match(/[0-9]+\.[0-9]+\.[0-9]+/);
-  if (versionMatch) {
-    version = versionMatch[0];
+  // 首先尝试从表格第一列提取版本号
+  const versionFromColumn = dataRow.match(/^\|\s*([0-9]+\.[0-9]+\.[0-9]+)/);
+  
+  if (versionFromColumn && versionFromColumn.length > 1) {
+    version = versionFromColumn[1];
   } else {
-    // Try another format
-    const altVersionMatch = downloadUrl.match(/Cursor-([0-9.]*)/);
-    if (altVersionMatch && altVersionMatch.length > 1) {
-      version = altVersionMatch[1];
+    // 尝试从URL中提取版本号
+    const versionMatch = downloadUrl.match(/[0-9]+\.[0-9]+\.[0-9]+/);
+    if (versionMatch) {
+      version = versionMatch[0];
     } else {
-      // Use timestamp as fallback
-      version = new Date().toISOString().split('T')[0].replace(/-/g, '');
+      // 尝试另一种格式
+      const altVersionMatch = downloadUrl.match(/Cursor-([0-9.]*)/);
+      if (altVersionMatch && altVersionMatch.length > 1) {
+        version = altVersionMatch[1];
+      } else {
+        // 使用时间戳作为备用方案
+        version = new Date().toISOString().split('T')[0].replace(/-/g, '');
+      }
     }
   }
 
-  return { version, downloadUrl };
+  return { version, downloadUrl, installerType };
 }
 
 // Make file executable (Linux/Mac only)
@@ -249,49 +294,41 @@ function archivePreviousVersion(currentVersion) {
   }
 }
 
-// Extract AppImage and copy resources
-function extractAppAndCopyResources(appImagePath, version, copyMode = 'full') {
+// Handle DMG file on macOS
+function handleMacDmg(dmgPath, version, copyMode = 'full') {
   try {
-    // Create version-specific app folder
     const versionAppDir = path.join(config.versionAppsDir, `cursor_${version}_app`);
     
     if (!fs.existsSync(versionAppDir)) {
       fs.mkdirSync(versionAppDir, { recursive: true });
       logInfo(`Created directory: ${versionAppDir}`);
     }
-
-    // Extract AppImage
-    logInfo(`Extracting AppImage: ${appImagePath}`);
     
-    // First, remove any existing extraction directory to avoid conflicts
-    if (fs.existsSync(config.extractDir)) {
-      logInfo(`Removing previous extraction directory: ${config.extractDir}`);
-      execSync(`rm -rf "${config.extractDir}"`);
+    // Create mount point if it doesn't exist
+    if (!fs.existsSync(config.tempMountPoint)) {
+      fs.mkdirSync(config.tempMountPoint, { recursive: true });
     }
     
-    // 首先复制一个临时副本，避免"Text file busy"错误
-    const tempAppImagePath = `${appImagePath}.temp`;
-    logInfo(`Creating temporary copy of AppImage...`);
-    execSync(`cp "${appImagePath}" "${tempAppImagePath}"`);
-    execSync(`chmod +x "${tempAppImagePath}"`);
+    // Mount the DMG
+    logInfo(`Mounting DMG: ${dmgPath}`);
+    execSync(`hdiutil attach "${dmgPath}" -mountpoint "${config.tempMountPoint}" -nobrowse`);
     
-    // 使用临时副本执行提取
-    logInfo(`Extracting from temporary copy...`);
-    execSync(`cd "${path.dirname(appImagePath)}" && "${tempAppImagePath}" --appimage-extract`);
-    logSuccess(`AppImage extracted successfully`);
+    // Find the .app directory in the mounted DMG
+    const appPath = path.join(config.tempMountPoint, 'Cursor.app');
     
-    // 删除临时副本
-    execSync(`rm -f "${tempAppImagePath}"`);
+    if (!fs.existsSync(appPath)) {
+      throw new Error(`Could not find Cursor.app in mounted DMG at ${appPath}`);
+    }
     
-    // Check if the expected resources directory exists
-    const resourcesAppDir = path.join(config.extractDir, 'usr', 'share', 'cursor', 'resources', 'app');
+    // Path to the resources/app directory in the .app bundle
+    const resourcesAppDir = path.join(appPath, 'Contents', 'Resources', 'app');
     
     if (!fs.existsSync(resourcesAppDir)) {
       throw new Error(`Expected resources directory not found: ${resourcesAppDir}`);
     }
     
     if (copyMode === 'full') {
-      // Copy full resources/app directory to version-specific folder (original behavior)
+      // Copy full resources/app directory to version-specific folder
       logInfo(`Copying full resources to: ${versionAppDir}`);
       execSync(`cp -r "${resourcesAppDir}"/* "${versionAppDir}"/`);
       logSuccess(`Full resources copied successfully to ${versionAppDir}`);
@@ -510,9 +547,301 @@ function extractAppAndCopyResources(appImagePath, version, copyMode = 'full') {
       throw new Error(`Invalid copy mode: ${copyMode}. Supported modes are 'full', 'core', or 'js-only'.`);
     }
     
+    // Unmount the DMG
+    logInfo('Unmounting DMG...');
+    execSync(`hdiutil detach "${config.tempMountPoint}" -force`);
+    logSuccess('DMG unmounted successfully');
+    
     return versionAppDir;
   } catch (error) {
-    logError(`Error extracting AppImage or copying resources: ${error.message}`);
+    // Ensure DMG is unmounted even if there was an error
+    try {
+      execSync(`hdiutil detach "${config.tempMountPoint}" -force`);
+    } catch (unmountError) {
+      // Ignore unmount errors
+    }
+    
+    logError(`Error handling DMG file: ${error.message}`);
+    return null;
+  }
+}
+
+// Extract AppImage or handle DMG and copy resources based on OS
+function extractAppAndCopyResources(installPath, version, copyMode = 'full') {
+  // For macOS, handle DMG
+  if (config.isMacOS && installPath.endsWith('.dmg')) {
+    return handleMacDmg(installPath, version, copyMode);
+  }
+  // For Linux, extract AppImage
+  else if (config.isLinux && installPath.endsWith('.AppImage')) {
+    try {
+      // Create version-specific app folder
+      const versionAppDir = path.join(config.versionAppsDir, `cursor_${version}_app`);
+      
+      if (!fs.existsSync(versionAppDir)) {
+        fs.mkdirSync(versionAppDir, { recursive: true });
+        logInfo(`Created directory: ${versionAppDir}`);
+      }
+
+      // Extract AppImage
+      logInfo(`Extracting AppImage: ${installPath}`);
+      
+      // First, remove any existing extraction directory to avoid conflicts
+      if (fs.existsSync(config.extractDir)) {
+        logInfo(`Removing previous extraction directory: ${config.extractDir}`);
+        execSync(`rm -rf "${config.extractDir}"`);
+      }
+      
+      // 首先复制一个临时副本，避免"Text file busy"错误
+      const tempAppImagePath = `${installPath}.temp`;
+      logInfo(`Creating temporary copy of AppImage...`);
+      execSync(`cp "${installPath}" "${tempAppImagePath}"`);
+      execSync(`chmod +x "${tempAppImagePath}"`);
+      
+      // 使用临时副本执行提取
+      logInfo(`Extracting from temporary copy...`);
+      execSync(`cd "${path.dirname(installPath)}" && "${tempAppImagePath}" --appimage-extract`);
+      logSuccess(`AppImage extracted successfully`);
+      
+      // 删除临时副本
+      execSync(`rm -f "${tempAppImagePath}"`);
+      
+      // Check if the expected resources directory exists
+      const resourcesAppDir = path.join(config.extractDir, 'usr', 'share', 'cursor', 'resources', 'app');
+      
+      if (!fs.existsSync(resourcesAppDir)) {
+        throw new Error(`Expected resources directory not found: ${resourcesAppDir}`);
+      }
+      
+      if (copyMode === 'full') {
+        // Copy full resources/app directory to version-specific folder
+        logInfo(`Copying full resources to: ${versionAppDir}`);
+        execSync(`cp -r "${resourcesAppDir}"/* "${versionAppDir}"/`);
+        logSuccess(`Full resources copied successfully to ${versionAppDir}`);
+      } else if (copyMode === 'core') {
+        // Copy only core AI components
+        logInfo(`Copying only core AI components to: ${versionAppDir}`);
+        
+        // Create necessary directories
+        const dirs = ['extensions', 'out'];
+        dirs.forEach(dir => {
+          const targetDir = path.join(versionAppDir, dir);
+          if (!fs.existsSync(targetDir)) {
+            fs.mkdirSync(targetDir, { recursive: true });
+            logInfo(`Created directory: ${targetDir}`);
+          }
+        });
+        
+        // Copy extensions directories
+        const extensionsDir = path.join(resourcesAppDir, 'extensions');
+        const coreExtensions = [
+          'cursor-always-local',
+          'cursor-retrieval',
+          'cursor-shadow-workspace',
+          'cursor-tokenize'
+        ];
+        
+        coreExtensions.forEach(extName => {
+          const sourceExtDir = path.join(extensionsDir, extName);
+          const targetExtDir = path.join(versionAppDir, 'extensions', extName);
+          
+          if (fs.existsSync(sourceExtDir)) {
+            execSync(`cp -r "${sourceExtDir}" "${path.join(versionAppDir, 'extensions')}"/`);
+            logInfo(`Copied extension: ${extName}`);
+          } else {
+            logInfo(`Extension directory not found: ${sourceExtDir}`);
+          }
+        });
+        
+        // Copy out directory
+        const sourceOutDir = path.join(resourcesAppDir, 'out');
+        if (fs.existsSync(sourceOutDir)) {
+          execSync(`cp -r "${sourceOutDir}" "${versionAppDir}"/`);
+          logInfo(`Copied out directory`);
+        } else {
+          logInfo(`Out directory not found: ${sourceOutDir}`);
+        }
+        
+        // Copy package.json and product.json
+        const filesToCopy = ['package.json', 'product.json'];
+        filesToCopy.forEach(file => {
+          const sourceFile = path.join(resourcesAppDir, file);
+          if (fs.existsSync(sourceFile)) {
+            execSync(`cp "${sourceFile}" "${versionAppDir}"/`);
+            logInfo(`Copied ${file}`);
+          } else {
+            logInfo(`File not found: ${sourceFile}`);
+          }
+        });
+        
+        logSuccess(`Core AI components copied successfully to ${versionAppDir}`);
+      } else if (copyMode === 'js-only') {
+        // Copy only core JavaScript files
+        logInfo(`Copying only core JavaScript files to: ${versionAppDir}`);
+        
+        // Create necessary directories
+        const dirs = [
+          'out', 'out/vs', 'out/vs/base/parts/sandbox/electron-sandbox', 
+          'out/vs/editor/common/services', 'out/vs/code/electron-sandbox/processExplorer',
+          'out/vs/code/electron-sandbox/workbench', 'out/vs/code/electron-utility/sharedProcess',
+          'out/vs/code/node', 'out/vs/platform/files/node/watcher',
+          'out/vs/platform/profiling/electron-sandbox', 'out/vs/platform/terminal/node',
+          'out/vs/workbench/api/node', 'out/vs/workbench/api/worker',
+          'out/vs/workbench/contrib/webview/browser/pre',
+          'out/vs/workbench/contrib/notebook/common/services',
+          'out/vs/workbench/contrib/output/common',
+          'out/vs/workbench/services/languageDetection/browser',
+          'out/vs/workbench/services/textMate/browser/backgroundTokenization/worker',
+          'out/vs/workbench/services/search/worker',
+          'out/vs/workbench/contrib/debug/node',
+          // Add extension directories
+          'extensions',
+          'extensions/cursor-always-local',
+          'extensions/cursor-always-local/dist',
+          'extensions/cursor-retrieval',
+          'extensions/cursor-retrieval/dist',
+          'extensions/cursor-shadow-workspace',
+          'extensions/cursor-shadow-workspace/dist',
+          'extensions/cursor-tokenize',
+          'extensions/cursor-tokenize/dist'
+        ];
+        
+        dirs.forEach(dir => {
+          const targetDir = path.join(versionAppDir, dir);
+          if (!fs.existsSync(targetDir)) {
+            fs.mkdirSync(targetDir, { recursive: true });
+            logInfo(`Created directory: ${targetDir}`);
+          }
+        });
+        
+        // Core JavaScript files based on categorization
+        const coreJsFiles = [
+          // Core Application Files
+          'out/bootstrap-fork.js',
+          'out/cli.js',
+          'out/main.js',
+          
+          // Base System Files
+          'out/vs/base/parts/sandbox/electron-sandbox/preload-aux.js',
+          'out/vs/base/parts/sandbox/electron-sandbox/preload.js',
+          
+          // Editor Core
+          'out/vs/editor/common/services/editorSimpleWorkerMain.js',
+          
+          // Code/Electron Integration
+          'out/vs/code/electron-sandbox/processExplorer/processExplorer.js',
+          'out/vs/code/electron-sandbox/processExplorer/processExplorerMain.js',
+          'out/vs/code/electron-sandbox/workbench/workbench.js',
+          'out/vs/code/electron-utility/sharedProcess/sharedProcessMain.js',
+          'out/vs/code/node/cliProcessMain.js',
+          
+          // Platform Services
+          'out/vs/platform/files/node/watcher/watcherMain.js',
+          'out/vs/platform/profiling/electron-sandbox/profileAnalysisWorkerMain.js',
+          'out/vs/platform/terminal/node/ptyHostMain.js',
+          
+          // Workbench API and Extensions
+          'out/vs/workbench/api/node/extensionHostProcess.js',
+          'out/vs/workbench/api/worker/extensionHostWorkerMain.js',
+          
+          // Webview and Browser Components
+          'out/vs/workbench/contrib/webview/browser/pre/service-worker.js',
+          
+          // Language and Text Processing
+          'out/vs/workbench/contrib/notebook/common/services/notebookSimpleWorkerMain.js',
+          'out/vs/workbench/contrib/output/common/outputLinkComputerMain.js',
+          'out/vs/workbench/services/languageDetection/browser/languageDetectionSimpleWorkerMain.js',
+          'out/vs/workbench/services/textMate/browser/backgroundTokenization/worker/textMateTokenizationWorker.workerMain.js',
+          
+          // Search Services
+          'out/vs/workbench/services/search/worker/localFileSearchMain.js',
+          
+          // Main UI
+          'out/vs/workbench/workbench.desktop.main.js',
+          
+          // Additional Files
+          'out/vs/workbench/contrib/debug/node/telemetryApp.js',
+          
+          // Add Cursor extension files
+          'extensions/cursor-always-local/dist/main.js',
+          'extensions/cursor-retrieval/dist/832.main.js',
+          'extensions/cursor-retrieval/dist/868.main.js',
+          'extensions/cursor-retrieval/dist/main.js',
+          'extensions/cursor-shadow-workspace/dist/extension.js',
+          'extensions/cursor-tokenize/dist/main.js'
+        ];
+        
+        // Copy individual JS files
+        coreJsFiles.forEach(file => {
+          const sourceFile = path.join(resourcesAppDir, file);
+          const targetFile = path.join(versionAppDir, file);
+          
+          if (fs.existsSync(sourceFile)) {
+            // Ensure the parent directory exists
+            const targetDir = path.dirname(targetFile);
+            if (!fs.existsSync(targetDir)) {
+              fs.mkdirSync(targetDir, { recursive: true });
+            }
+            
+            execSync(`cp "${sourceFile}" "${targetFile}"`);
+            logInfo(`Copied ${file}`);
+          } else {
+            logInfo(`File not found: ${sourceFile}`);
+          }
+        });
+        
+        // Also copy extension package.json files to ensure proper functionality
+        const extensionPackageJsonFiles = [
+          'extensions/cursor-always-local/package.json',
+          'extensions/cursor-retrieval/package.json', 
+          'extensions/cursor-shadow-workspace/package.json',
+          'extensions/cursor-tokenize/package.json'
+        ];
+        
+        extensionPackageJsonFiles.forEach(file => {
+          const sourceFile = path.join(resourcesAppDir, file);
+          const targetFile = path.join(versionAppDir, file);
+          
+          if (fs.existsSync(sourceFile)) {
+            // Ensure the parent directory exists
+            const targetDir = path.dirname(targetFile);
+            if (!fs.existsSync(targetDir)) {
+              fs.mkdirSync(targetDir, { recursive: true });
+            }
+            
+            execSync(`cp "${sourceFile}" "${targetFile}"`);
+            logInfo(`Copied ${file}`);
+          } else {
+            logInfo(`File not found: ${sourceFile}`);
+          }
+        });
+        
+        // Copy package.json and product.json which might be needed
+        const filesToCopy = ['package.json', 'product.json'];
+        filesToCopy.forEach(file => {
+          const sourceFile = path.join(resourcesAppDir, file);
+          if (fs.existsSync(sourceFile)) {
+            execSync(`cp "${sourceFile}" "${versionAppDir}"/`);
+            logInfo(`Copied ${file}`);
+          } else {
+            logInfo(`File not found: ${sourceFile}`);
+          }
+        });
+        
+        logSuccess(`Core JavaScript files and Cursor extensions copied successfully to ${versionAppDir}`);
+      } else {
+        throw new Error(`Invalid copy mode: ${copyMode}. Supported modes are 'full', 'core', or 'js-only'.`);
+      }
+      
+      return versionAppDir;
+    } catch (error) {
+      logError(`Error extracting AppImage or copying resources: ${error.message}`);
+      return null;
+    }
+  }
+  // Windows or unsupported format
+  else {
+    logError(`Unsupported installer format for this platform: ${installPath}`);
     return null;
   }
 }
@@ -616,10 +945,10 @@ async function main() {
     
     // 检查是否需要重新下载（如果latest_cursor目录为空）
     const latestCursorFiles = fs.readdirSync(config.latestCursorDir);
-    const hasAppImage = latestCursorFiles.some(file => file.endsWith('.AppImage'));
+    const hasInstallerFile = latestCursorFiles.length > 0;
     
-    // 如果latest_cursor目录中没有AppImage文件，则重置版本数据库
-    if (!hasAppImage) {
+    // 如果latest_cursor目录中没有安装文件，则重置版本数据库
+    if (!hasInstallerFile) {
       logInfo('New download location detected, will download latest version...');
       saveCurrentVersion(null); // 重置版本数据库
     }
@@ -633,24 +962,31 @@ async function main() {
     const readmeContent = await downloadReadme();
     
     // Extract version info
-    const { version, downloadUrl } = extractVersionInfo(readmeContent);
+    const { version, downloadUrl, installerType } = extractVersionInfo(readmeContent);
     logSuccess(`Latest version available: ${version}`);
     
     // Check if update is needed
-    if (version === currentVersion && hasAppImage) {
+    if (version === currentVersion && hasInstallerFile) {
       logSuccess('You already have the latest version installed.');
       
       // Optional: Even if already installed, ask if should extract and copy resources
-      const appImagePath = path.join(config.latestCursorDir, `Cursor-${version}.AppImage`);
-      if (fs.existsSync(appImagePath)) {
+      let installerPath;
+      
+      if (config.isMacOS) {
+        installerPath = path.join(config.latestCursorDir, `Cursor-${version}.dmg`);
+      } else if (config.isWindows) {
+        installerPath = path.join(config.latestCursorDir, `Cursor-${version}.exe`);
+      } else {
+        installerPath = path.join(config.latestCursorDir, `Cursor-${version}.AppImage`);
+      }
+      
+      if (fs.existsSync(installerPath)) {
         logInfo('The latest version is already downloaded.');
-        // NOTE: If running this script programmatically, you might want to add a flag here
-        // to control whether to extract even if the version is already installed.
         
-        // Extract and copy resources from the existing AppImage
-        const versionAppDir = extractAppAndCopyResources(appImagePath, version, copyMode);
+        // Extract and copy resources from the existing installer
+        const versionAppDir = extractAppAndCopyResources(installerPath, version, copyMode);
         
-        // Clean up extraction directory
+        // Clean up extraction directory if it was created
         cleanupExtractDir();
         
         if (versionAppDir) {
@@ -662,16 +998,27 @@ async function main() {
     }
     
     // Set paths for new version
-    const appImageFileName = `Cursor-${version}.AppImage`;
-    const downloadPath = path.join(config.latestCursorDir, appImageFileName);
+    let installerFileName;
+    
+    if (config.isMacOS) {
+      installerFileName = `Cursor-${version}.dmg`;
+    } else if (config.isWindows) {
+      installerFileName = `Cursor-${version}.exe`;
+    } else {
+      installerFileName = `Cursor-${version}.AppImage`;
+    }
+    
+    const downloadPath = path.join(config.latestCursorDir, installerFileName);
     
     // Download new version
     logInfo(`Downloading Cursor ${version}...`);
     await downloadFile(downloadUrl, downloadPath);
     logSuccess(`Downloaded to: ${downloadPath}`);
     
-    // Make executable
-    makeExecutable(downloadPath);
+    // Make executable if it's an AppImage
+    if (installerType === 'AppImage') {
+      makeExecutable(downloadPath);
+    }
     
     // Archive previous version if it exists
     if (currentVersion) {
@@ -681,7 +1028,7 @@ async function main() {
     // Extract and copy resources
     const versionAppDir = extractAppAndCopyResources(downloadPath, version, copyMode);
     
-    // Clean up extraction directory
+    // Clean up extraction directory if it was created
     cleanupExtractDir();
     
     // Update version database
@@ -693,7 +1040,6 @@ async function main() {
     }
     
     logSuccess('Cursor auto-update completed successfully!');
-    logInfo(`You can start the latest version by running: ${downloadPath}`);
     
     if (versionAppDir) {
       logSuccess(`Resources available at: ${versionAppDir}`);
